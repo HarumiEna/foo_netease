@@ -1,0 +1,27 @@
+# 构建产物
+foo_netease/bin/
+foo_netease/obj/
+foo_netease/src/x64/
+foo_netease/src/Release/
+foo_netease/src/Win32/
+*.ipdb
+*.iobj
+*.pdb
+*.ilk
+*.tlog
+*.lastbuildstate
+*.obj
+*.log
+*.user
+.vs/
+
+# foobar2000 SDK（请自行放置，不要提交）
+sdk/
+
+# 打包产物
+dist/
+
+# 系统
+Thumbs.db
+desktop.ini
+.DS_Store
