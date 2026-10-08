@@ -11,8 +11,7 @@
 #include "netease_data.h"
 #include "session.h"
 
-// ---------------------------------------------------------------------------
-// D3：把网易云歌单链接拖进 foobar2000 就能加载。
+// 把网易云歌单链接拖进 foobar2000 就能加载。
 //
 // 支持的链接形式（都在下面的 parse_playlist_id 里处理）：
 //   netease://playlist/<id>
@@ -23,7 +22,6 @@
 // 实现要点：open() 在工作线程里被调用，拿 trackIds 全集（tracks 会被服务端截断），
 // 再分批补元数据塞进缓存，最后逐条回调 on_entry —— 这样拖进来的播放列表
 // 立刻就有标题/歌手/专辑，不需要用户再等一轮网络。
-// ---------------------------------------------------------------------------
 
 namespace {
 
@@ -79,18 +77,23 @@ public:
 		std::vector<int64_t> ids;
 		std::string name;
 		int64_t track_count = -1;
-		netease::ApiCall detail = api.playlist_track_ids(playlist_id, ids, name, track_count);
+		std::vector<netease::TrackInfo> seed;
+		netease::ApiCall detail = api.playlist_track_ids(playlist_id, ids, name, track_count, &seed);
 		if (!detail.ok) throw exception_io_data(("取歌单失败：" + detail.error).c_str());
+		// 详情自带的元数据先入缓存，少发一批请求。
+		if (!seed.empty()) netease::MetaCache::instance().put_all(seed);
 		if (ids.empty()) throw exception_io_data("这个歌单是空的");
 
 		// 补元数据：只影响速度，不影响条数；失败也照样把曲目加进去。
+		// 命中曲目缓存的不会再请求，重复加载同一个歌单几乎不用等。
 		std::vector<netease::TrackInfo> tracks;
 		std::vector<int64_t> missing;
-		netease::ApiCall songs = api.song_details(ids, tracks, &missing);
+		netease_data::TracksFetchStats stats;
+		netease::ApiCall songs = netease_data::load_tracks_cached(api, ids, tracks, &missing, &stats);
 		if (songs.ok) {
-			netease::MetaCache::instance().put_all(tracks);
 			netease_log::write("foo_netease: 歌单「" + name + "」元数据 " + std::to_string(tracks.size()) +
-				" 首（trackIds " + std::to_string(ids.size()) + "，缺 " + std::to_string(missing.size()) + "）");
+				" 首（trackIds " + std::to_string(ids.size()) + "，缓存命中 " + std::to_string(stats.cached) +
+				"，请求 " + std::to_string(stats.requested) + "，缺 " + std::to_string(missing.size()) + "）");
 		} else {
 			netease_log::write("foo_netease: 歌单元数据读取失败，仅按 id 写入：" + songs.error);
 		}

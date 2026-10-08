@@ -24,12 +24,9 @@ void log_line(const std::string & text) {
 
 // 用当前登录态查一次歌曲直链，确认 VIP 音质确实生效（未登录时只会给 45 秒试听）。
 
-// ---------------------------------------------------------------------------
-// 设置页。
 //  · 构造函数接收 preferences_page_callback；
 //  · 不自己 Create 窗口，preferences_page_impl<> 负责；
 //  · get_wnd() 由 preferences_page_impl<> 提供。
-// ---------------------------------------------------------------------------
 class netease_prefs_dialog : public CDialogImpl<netease_prefs_dialog>, public preferences_page_instance {
 public:
 	explicit netease_prefs_dialog(preferences_page_callback::ptr callback) : m_callback(callback) {}
@@ -111,7 +108,7 @@ private:
 
 
 	void OnBrowse(UINT, int, CWindow) {
-		netease_ui::show_browse_window();
+		netease_ui::show_browse_window(m_hWnd);
 	}
 
 

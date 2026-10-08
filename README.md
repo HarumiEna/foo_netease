@@ -6,7 +6,7 @@ foobar2000 的网易云音乐组件：登录账号、浏览歌单、直接播放
 
 [![Stars](https://img.shields.io/github/stars/HarumiEna/foo_netease?style=flat-square&label=Stars&color=blue)](https://github.com/HarumiEna/foo_netease/stargazers) [![Forks](https://img.shields.io/github/forks/HarumiEna/foo_netease?style=flat-square&label=Forks&color=blue)](https://github.com/HarumiEna/foo_netease/forks) [![Downloads](https://img.shields.io/github/downloads/HarumiEna/foo_netease/total?style=flat-square&label=Downloads&color=green)](https://github.com/HarumiEna/foo_netease/releases)
 
-- 版本 **0.18.0** ｜ Windows ｜ foobar2000 **v2.x**（x64 / Win32）
+- 版本 **0.18.1** ｜ Windows ｜ foobar2000 **v2.x**（x64 / Win32）
 - 第三方个人作品，与网易云音乐官方无关
 
 ## 功能

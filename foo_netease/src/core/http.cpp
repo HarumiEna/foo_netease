@@ -283,9 +283,7 @@ HttpResult request(const std::string & method, const std::string & url, const st
 
 } // namespace
 
-// ---------------------------------------------------------------------------
 // HttpStream：流式 GET。设计理由见 core/http.h 里的说明。
-// ---------------------------------------------------------------------------
 
 struct HttpStream::Impl {
 	WinHttpHandle session;

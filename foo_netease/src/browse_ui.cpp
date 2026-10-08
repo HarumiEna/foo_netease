@@ -48,15 +48,16 @@ class BrowseWindow : public CDialogImpl<BrowseWindow> {
 public:
 	enum { IDD = IDD_NETEASE_BROWSE };
 
-	static void open() {
+	// owner 传设置页/主窗口：设置页是模态窗口，没有 owner 的新窗口会被压在后面，
+	// 用户看到的现象是「点一次没反应，再点一次才出来」。
+	static void open(fb2k::hwnd_t owner) {
 		if (!s_instance) s_instance = new BrowseWindow();
 		if (!s_instance->m_hWnd) {
 			s_instance->m_alive = std::make_shared<Liveness>();
-			s_instance->Create(nullptr);
-		} else {
-			s_instance->ShowWindow(SW_SHOW);
-			::SetForegroundWindow(s_instance->m_hWnd);
+			s_instance->Create(reinterpret_cast<HWND>(owner));
 		}
+		s_instance->ShowWindow(SW_SHOW);
+		::SetForegroundWindow(s_instance->m_hWnd);
 	}
 
 	BEGIN_MSG_MAP_EX(BrowseWindow)
@@ -215,24 +216,25 @@ private:
 			std::vector<int64_t> ids;
 			std::string name;
 			int64_t track_count = -1;
-			netease::ApiCall detail = api.playlist_track_ids(playlist_id, ids, name, track_count);
+			std::vector<netease::TrackInfo> seed;
+			netease::ApiCall detail = api.playlist_track_ids(playlist_id, ids, name, track_count, &seed);
+			// 详情自带的元数据先入缓存：≤1000 首的歌单到这一步已经全有了。
+			if (!seed.empty()) netease::MetaCache::instance().put_all(seed);
 			if (!detail.ok) {
 				post_status(alive, "取歌单详情失败：" + detail.error);
 				return;
 			}
 
 			// 关键：tracks 会被服务端截断（实测 1368 首只给 1000 条），
-			// 所以这里用 trackIds 全集，再分批补元数据。
+			// 所以这里用 trackIds 全集，再按曲目缓存补元数据（命中缓存的**不再请求**）。
 			std::vector<netease::TrackInfo> tracks;
 			std::vector<int64_t> missing;
-			netease::ApiCall songs = api.song_details(ids, tracks, &missing);
+			netease_data::TracksFetchStats stats;
+			netease::ApiCall songs = netease_data::load_tracks_cached(api, ids, tracks, &missing, &stats);
 			if (!songs.ok) {
 				post_status(alive, "取曲目详情失败：" + songs.error);
 				return;
 			}
-			netease::MetaCache::instance().put_all(tracks);
-			// 拿到就存：不依赖"干净退出"，强杀进程也不会丢缓存。
-			netease_app::save_meta_cache();
 
 			std::string summary = name + "：" + std::to_string(ids.size()) + " 首";
 			if (track_count >= 0 && static_cast<size_t>(track_count) != ids.size()) {
@@ -447,8 +449,8 @@ BrowseWindow * BrowseWindow::s_instance = nullptr;
 
 } // namespace
 
-void show_browse_window() {
-	BrowseWindow::open();
+void show_browse_window(fb2k::hwnd_t parent) {
+	BrowseWindow::open(parent);
 }
 
 } // namespace netease_ui

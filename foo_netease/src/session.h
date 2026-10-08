@@ -80,7 +80,7 @@ public:
 	void cancel_qr_login();  // 异步取消（不阻塞 UI）
 	bool logout();           // 清凭据并落盘
 
-	// --- 给 input（M5）用：当前登录 Cookie ---
+	// --- 给 input 用：当前登录 Cookie ---
 	std::string cookie_header() const;
 	bool logged_in() const { return m_state.load() == LoginState::LoggedIn; }
 

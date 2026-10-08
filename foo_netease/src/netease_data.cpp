@@ -12,6 +12,7 @@
 #include <mutex>
 #include <random>
 #include <set>
+#include <unordered_map>
 #include <utility>
 
 #include "component_log.h"
@@ -466,21 +467,26 @@ void post_result(LivenessPtr alive, std::function<void(T)> done, T result) {
 	});
 }
 
-// 歌单 id -> 曲目。用 trackIds 全集（tracks 会被服务端截断），再分批补元数据。
+
+// 歌单 id -> 曲目。用 trackIds 全集（tracks 会被服务端截断），再按缓存补元数据。
 FeedResult load_playlist_tracks(netease::NeteaseApi & api, int64_t playlist_id) {
 	FeedResult r;
 	std::vector<int64_t> ids;
 	std::string name;
 	int64_t track_count = -1;
-	netease::ApiCall detail = api.playlist_track_ids(playlist_id, ids, name, track_count);
+	std::vector<netease::TrackInfo> seed;
+	netease::ApiCall detail = api.playlist_track_ids(playlist_id, ids, name, track_count, &seed);
 	if (!detail.ok) { r.error = "取歌单详情失败：" + detail.error; return r; }
+	// 详情自带的元数据先入缓存：≤1000 首的歌单到这一步已经全有了。
+	if (!seed.empty()) netease::MetaCache::instance().put_all(seed);
 
 	std::vector<int64_t> missing;
-	netease::ApiCall songs = api.song_details(ids, r.tracks, &missing);
+	TracksFetchStats stats;
+	netease::ApiCall songs = load_tracks_cached(api, ids, r.tracks, &missing, &stats);
 	if (!songs.ok) { r.error = "取曲目详情失败：" + songs.error; return r; }
-
-	netease::MetaCache::instance().put_all(r.tracks);
-	netease_app::save_meta_cache();
+	netease_log::write("foo_netease: 歌单曲目 " + std::to_string(stats.ids) + " 首 —— 缓存命中 " +
+		std::to_string(stats.cached) + "，请求 " + std::to_string(stats.requested) +
+		"，返回 " + std::to_string(stats.fetched));
 
 	r.title = (name.empty() ? ("歌单 " + std::to_string(playlist_id)) : name) +
 		"：" + std::to_string(ids.size()) + " 首";
@@ -515,6 +521,47 @@ void run_async(LivenessPtr alive, std::function<void(FeedResult)> done,
 }
 
 } // namespace
+
+// 按 ids 取曲目元数据：命中缓存的直接取，只把缺的发给服务端。
+netease::ApiCall load_tracks_cached(netease::NeteaseApi & api, const std::vector<int64_t> & ids,
+	std::vector<netease::TrackInfo> & out, std::vector<int64_t> * missing,
+	TracksFetchStats * stats) {
+	out.clear();
+	if (missing) missing->clear();
+	netease::ApiCall ok;
+	ok.ok = true;
+	if (ids.empty()) return ok;
+
+	auto & cache = netease::MetaCache::instance();
+	std::unordered_map<int64_t, netease::TrackInfo> have;
+	std::vector<int64_t> need;
+	have.reserve(ids.size());
+	need.reserve(64);
+	for (int64_t id : ids) {
+		netease::TrackInfo t;
+		if (cache.get(id, t)) have.emplace(id, std::move(t));
+		else need.push_back(id);
+	}
+	if (stats) { stats->ids = ids.size(); stats->cached = have.size(); stats->requested = need.size(); }
+
+	if (!need.empty()) {
+		std::vector<netease::TrackInfo> fetched;
+		netease::ApiCall call = api.song_details(need, fetched, nullptr);
+		if (!call.ok) return call;
+		cache.put_all(fetched);
+		if (stats) stats->fetched = fetched.size();
+		for (auto & t : fetched) have.emplace(t.id, std::move(t));
+	}
+
+	out.reserve(ids.size());
+	for (int64_t id : ids) {
+		auto it = have.find(id);
+		if (it != have.end()) out.push_back(it->second);
+		else if (missing) missing->push_back(id);
+	}
+	netease_app::save_meta_cache();
+	return ok;
+}
 
 void load_playlist_link_async(LivenessPtr alive, const std::string & link,
 	std::function<void(FeedResult)> done) {

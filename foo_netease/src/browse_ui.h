@@ -5,7 +5,8 @@
 
 namespace netease_ui {
 
-void show_browse_window();
+// parent 一般传设置页或主窗口，作为新窗口的 owner（否则会被模态窗口压住）。
+void show_browse_window(fb2k::hwnd_t parent = nullptr);
 
 } // namespace netease_ui
 

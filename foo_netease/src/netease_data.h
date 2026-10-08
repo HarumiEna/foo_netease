@@ -23,7 +23,6 @@ struct Liveness { std::atomic<bool> alive{ true }; };
 using LivenessPtr = std::shared_ptr<Liveness>;
 
 // 把一组曲目写成 netease:// 句柄放进当前播放列表；replace=true 时先清空。
-// 返回实际加入的数量。
 size_t insert_tracks(const std::vector<netease::TrackInfo> & tracks, bool replace);
 
 struct FeedResult {
@@ -93,6 +92,19 @@ int64_t parse_playlist_link(const std::string & text);
 // 直接把一个歌单链接加载成曲目列表（面板搜索框里粘链接就是走这条）。
 void load_playlist_link_async(LivenessPtr alive, const std::string & link,
 	std::function<void(FeedResult)> done);
+
+// 按 ids 取曲目元数据：命中曲目缓存的**不再发请求**，只对缺的走批量接口。
+// 这是"重复打开同一个歌单不用等"的关键——第一次拉全量，之后就只补新歌。
+// out 与 ids 顺序一致，取不到的 id 收进 missing。stats 可传 nullptr。
+struct TracksFetchStats {
+	size_t ids = 0;        // 请求的曲目数
+	size_t cached = 0;     // 命中缓存、没走网络的
+	size_t requested = 0;  // 实际发给服务端的
+	size_t fetched = 0;    // 服务端返回的
+};
+netease::ApiCall load_tracks_cached(netease::NeteaseApi & api, const std::vector<int64_t> & ids,
+	std::vector<netease::TrackInfo> & out, std::vector<int64_t> * missing = nullptr,
+	TracksFetchStats * stats = nullptr);
 
 void load_playlists_async(LivenessPtr alive, std::function<void(PlaylistsResult)> done);
 void load_daily_async(LivenessPtr alive, std::function<void(FeedResult)> done);

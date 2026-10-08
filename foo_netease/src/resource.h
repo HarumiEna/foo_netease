@@ -25,7 +25,7 @@
 #define IDC_LOGIN_HINT          1012
 #define IDC_LOGIN_REFRESH       1013
 
-// ---- M4 浏览窗口 ----
+// ---- 浏览窗口 ----
 #define IDD_NETEASE_BROWSE      105
 
 #define IDC_BROWSE_PLAYLISTS    1040

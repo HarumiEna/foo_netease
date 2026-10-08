@@ -41,7 +41,7 @@ struct SongUrlInfo {
 	json::Value raw;          // 服务端原样返回
 };
 
-// 曲目元数据。字段名全部来自实测响应，不是猜的。
+// 曲目元数据。字段名来自实测响应。
 struct TrackInfo {
 	int64_t id = 0;
 	std::string title;      // name
@@ -107,7 +107,7 @@ public:
 	SongUrlInfo song_url(int64_t id, const std::string & level = "exhigh",
 		const std::string & encode_type = "flac");
 
-	// ===== M4：账号 / 歌单 / 搜索（全部已用真实请求验证过）=====
+	// ===== 账号 / 歌单 / 搜索 =====
 
 	// POST /weapi/w/nuser/account/get -> account.id / profile.nickname
 	ApiCall account(int64_t & uid, std::string & nickname);
@@ -124,8 +124,10 @@ public:
 	// POST /weapi/v6/playlist/detail
 	// 注意：响应里的 tracks 数组会被服务端截断在 1000 条，而 trackIds 是全集，
 	// 所以这里优先返回 trackIds；需要元数据时再走 song_details 分批补。
+	// 歌单详情里还带最多 1000 首的完整元数据（tracks）。一并解析出来（seed）先填进
+	// 曲目缓存，这样 ≤1000 首的歌单不必再发 song_details 请求。
 	ApiCall playlist_track_ids(int64_t playlist_id, std::vector<int64_t> & ids,
-		std::string & name, int64_t & track_count);
+		std::string & name, int64_t & track_count, std::vector<TrackInfo> * seed = nullptr);
 
 	// POST /weapi/v3/song/detail，内部按 200 个一批自动分批。
 	ApiCall song_details(const std::vector<int64_t> & ids, std::vector<TrackInfo> & out,

@@ -6,7 +6,7 @@
 //  · RSA 1024 裸加密（无填充，BCRYPT_PAD_NONE）：weapi 的 encSecKey 用；
 //  · MD5：eapi 的摘要用。
 //
-// 常量来源（不许凭记忆写常量）：见 crypto.cpp 顶部注释。
+// 常量来源：见 crypto.cpp 顶部注释。
 // 本层的正确性用固定输入与 Node 参考实现的结果逐字节比对过。
 
 #include <cstdint>

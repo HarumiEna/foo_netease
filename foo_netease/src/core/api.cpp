@@ -286,7 +286,6 @@ static std::string join_names(const json::Value * array) {
 	return out;
 }
 
-// 解析一首歌。
 //
 // 这里刻意**同时兼容两套 schema**：v3/song/detail、v6/playlist/detail、cloudsearch 用
 // 新字段（ar/al/dt），而漫游（radio/get）等仍返回旧字段（artists/album/duration）。
@@ -750,7 +749,7 @@ ApiCall NeteaseApi::playlist_square_list(const std::string & cat, int limit, int
 }
 
 ApiCall NeteaseApi::playlist_track_ids(int64_t playlist_id, std::vector<int64_t> & ids,
-	std::string & name, int64_t & track_count) {
+	std::string & name, int64_t & track_count, std::vector<TrackInfo> * seed) {
 	ids.clear();
 	name.clear();
 	track_count = -1;
@@ -781,6 +780,18 @@ ApiCall NeteaseApi::playlist_track_ids(int64_t playlist_id, std::vector<int64_t>
 			}
 		}
 	}
+
+	// tracks（最多 1000 条）自带元数据，先解析出来当缓存种子，能省掉一批请求。
+	if (seed) {
+		seed->clear();
+		if (const json::Value * arr = playlist->find("tracks")) {
+			if (arr->is_array()) {
+				for (size_t i = 0; i < arr->size(); ++i) {
+					if (const json::Value * item = arr->at(i)) seed->push_back(parse_track(*item));
+				}
+			}
+		}
+	}
 	return call;
 }
 
@@ -794,7 +805,7 @@ ApiCall NeteaseApi::song_details(const std::vector<int64_t> & ids, std::vector<T
 		return empty;
 	}
 
-	const size_t kBatch = 200;
+	const size_t kBatch = 1000;
 	ApiCall last;
 	last.ok = true;
 	for (size_t start = 0; start < ids.size(); start += kBatch) {
