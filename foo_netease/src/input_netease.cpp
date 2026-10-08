@@ -422,20 +422,25 @@ public:
 		//（例如 ESLyric 的「内嵌歌词」来源）能直接读到。
 		// 播放时已后台预取；取到后会 dispatch_refresh，于是这里会被再调一次。
 		{
-			std::string lyric;
-			if (netease_lyric::get_cached(m_id, lyric) && !lyric.empty()) {
-				// ESLyric 的「内嵌歌词」读的是 %LYRICS%（从它的 DLL 字符串确认），
-				// 另外两个名字是别家歌词组件常用的，一并给出。
-				p_info.meta_set("LYRICS", lyric.c_str());
+			std::string lyric, enhanced;
+			const bool has_plain = netease_lyric::get_cached(m_id, lyric) && !lyric.empty();
+			const bool has_enh = netease_lyric::get_cached_enhanced(m_id, enhanced) && !enhanced.empty();
+			if (has_plain || has_enh) {
+				// ESLyric 的「内嵌歌词」来源读的就是 %LYRICS%（从它的 DLL 字符串确认）。
+				// **必须给它增强型**：它选「显示增强型歌词」时会解析词级 <mm:ss.xxx> 标签，
+				// 给它普通歌词的话这个开关就形同虚设（之前的 bug）。
+				// LYRIC / UNSYNCEDLYRICS 给普通版，免得别家只认普通 LRC 的组件显示出一堆尖括号。
+				const std::string & tag_lyric = has_enh ? enhanced : lyric;
+				p_info.meta_set("LYRICS", tag_lyric.c_str());
 				p_info.meta_set("LYRIC", lyric.c_str());
 				p_info.meta_set("UNSYNCEDLYRICS", lyric.c_str());
 				// 同时落一份 .lrc，供歌词显示器的「本地歌词文件夹」使用
 				// （比依赖标签更可靠：ESLyric 的本地来源就是这么找文件的）。
-				netease_lyric::ensure_lrc_file(m_id, track.artists, track.title, lyric);
+				netease_lyric::ensure_lrc_file(m_id, track.artists, track.title, tag_lyric);
 				static std::atomic<int> lyric_logged{ 0 };
 				if (lyric_logged.fetch_add(1) < 3) {
 					netease_log::write("foo_netease [input] 已把歌词作为 LYRIC 标签提供给 foobar2000（id=" +
-						std::to_string(m_id) + "，" + std::to_string(lyric.size()) + " 字节）");
+						std::to_string(m_id) + "，" + std::to_string(tag_lyric.size()) + " 字节" + (has_enh ? "（增强型）" : "") + "）");
 				}
 			}
 		}

@@ -344,11 +344,15 @@ ApiCall NeteaseApi::daily_recommend(std::vector<TrackInfo> & out) {
 	return call;
 }
 
-ApiCall NeteaseApi::lyrics(int64_t id, std::string & lrc, std::string & translated) {
+ApiCall NeteaseApi::lyrics(int64_t id, std::string & lrc, std::string & translated,
+	std::string * yrc, std::string * yrc_translated) {
 	lrc.clear();
 	translated.clear();
+	if (yrc) yrc->clear();
+	if (yrc_translated) yrc_translated->clear();
+	// yv/ytv = 逐字（增强型）歌词；没有版权的歌会返回空。
 	const std::string body = "{\"id\":" + std::to_string(id) +
-		",\"lv\":-1,\"kv\":-1,\"tv\":-1,\"csrf_token\":\"\"}";
+		",\"lv\":-1,\"kv\":-1,\"tv\":-1,\"yv\":-1,\"ytv\":-1,\"csrf_token\":\"\"}";
 	ApiCall call = weapi_post("/song/lyric", body);
 	if (!call.ok) return call;
 
@@ -357,6 +361,16 @@ ApiCall NeteaseApi::lyrics(int64_t id, std::string & lrc, std::string & translat
 	}
 	if (const json::Value * block = call.json.find("tlyric")) {
 		if (const json::Value * v = block->find("lyric")) translated = v->as_string();
+	}
+	if (yrc) {
+		if (const json::Value * block = call.json.find("yrc")) {
+			if (const json::Value * v = block->find("lyric")) *yrc = v->as_string();
+		}
+	}
+	if (yrc_translated) {
+		if (const json::Value * block = call.json.find("ytlyric")) {
+			if (const json::Value * v = block->find("lyric")) *yrc_translated = v->as_string();
+		}
 	}
 	if (lrc.empty()) {
 		call.ok = false;
@@ -871,6 +885,45 @@ ApiCall NeteaseApi::search_songs(const std::string & keyword, int limit, int off
 	if (!songs || !songs->is_array()) return call;   // ok，out 为空
 	for (size_t i = 0; i < songs->size(); ++i) {
 		if (const json::Value * item = songs->at(i)) out.push_back(parse_track(*item));
+	}
+	return call;
+}
+
+ApiCall NeteaseApi::search_playlists(const std::string & keyword, int limit, int offset,
+	std::vector<PlaylistInfo> & out, int * p_total) {
+	out.clear();
+	const std::string body = "{\"s\":\"" + json::escape(keyword) +
+		"\",\"type\":1000,\"limit\":" + std::to_string(limit) +
+		",\"offset\":" + std::to_string(offset) + ",\"csrf_token\":\"\"}";
+	ApiCall call = weapi_post("/cloudsearch/get/web", body);
+	if (!call.ok) return call;
+
+	const json::Value * result = call.json.find("result");
+	if (p_total) {
+		*p_total = 0;
+		if (const json::Value * count = result ? result->find("playlistCount") : nullptr) {
+			*p_total = static_cast<int>(count->as_int64());
+		}
+	}
+	if (!result) {
+		call.ok = false;
+		call.error = "歌单搜索响应里没有 result 字段：" + call.raw_body;
+		return call;
+	}
+	// 同 search_songs：到底时没有 playlists 字段，属于"没有更多"，不算失败。
+	const json::Value * lists = result->find("playlists");
+	if (!lists || !lists->is_array()) return call;
+	for (size_t i = 0; i < lists->size(); ++i) {
+		const json::Value * item = lists->at(i);
+		if (!item) continue;
+		PlaylistInfo info;
+		if (const json::Value * v = item->find("id")) info.id = v->as_int64();
+		if (const json::Value * v = item->find("name")) info.name = v->as_string();
+		if (const json::Value * v = item->find("trackCount")) info.track_count = v->as_int64();
+		if (const json::Value * creator = item->find("creator")) {
+			if (const json::Value * nick = creator->find("nickname")) info.creator = nick->as_string();
+		}
+		if (info.id != 0) out.push_back(info);
 	}
 	return call;
 }

@@ -138,6 +138,10 @@ public:
 	ApiCall search_songs(const std::string & keyword, int limit, int offset,
 		std::vector<TrackInfo> & out, int * p_total = nullptr);
 
+	// 同上接口，type=1000 —— 搜歌单。结果放在 result.playlists。
+	ApiCall search_playlists(const std::string & keyword, int limit, int offset,
+		std::vector<PlaylistInfo> & out, int * p_total = nullptr);
+
 	// 日推：POST /weapi/v1/discovery/recommend/songs
 	// 响应里歌曲数组可能是 data.dailySongs / data.recommend / 顶层 recommend，三种都兼容。
 	ApiCall daily_recommend(std::vector<TrackInfo> & out);
@@ -183,7 +187,9 @@ public:
 	// 歌词：POST /weapi/song/lyric
 	// 返回 lrc.lyric（原文）与 tlyric.lyric（翻译，可能没有）。
 	// 实测：未登录也能拿到歌词，登录后更稳。
-	ApiCall lyrics(int64_t id, std::string & lrc, std::string & translated);
+	// yrc/yrc_translated 是**逐字**歌词（增强型，可能为空）。
+	ApiCall lyrics(int64_t id, std::string & lrc, std::string & translated,
+		std::string * yrc = nullptr, std::string * yrc_translated = nullptr);
 
 	// 音质降级链：从请求档位起依次往下试，返回第一个能拿到直链的结果。
 	// 顺序：hires -> lossless -> exhigh -> higher -> standard

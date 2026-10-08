@@ -3,6 +3,7 @@
 #include "meta_store.h"
 #include "netease_data.h"
 #include "session.h"
+#include "theme.h"
 
 #include <filesystem>
 #include <windows.h>
@@ -10,7 +11,7 @@
 // 组件标识。
 DECLARE_COMPONENT_VERSION(
 	"网易云音乐 (Netease Cloud Music)",
-	"0.19.0",
+	"0.20.0",
 	"在 foobar2000 内登录网易云音乐账号、浏览歌单并直接播放。\n"
 	"\n"
 	"功能：\n"
@@ -25,7 +26,8 @@ DECLARE_COMPONENT_VERSION(
 	"   搜索框里粘歌单链接同样可用。\n"
 	" · 歌词输出：同时写入本地歌词文件（<profile>\\lyrics，文件名「标题 - 歌手」）并作为\n"
 	"   LYRIC / LYRICS / UNSYNCEDLYRICS 标签提供，foobar2000 的歌词显示器（如 ESLyric）直接可用；\n"
-	"   另有 %lyric% / %netease_lyric% 字段与独立歌词窗口。\n"
+	"   有逐字版权时优先输出增强型（逐字）歌词，另有 %lyric% / %netease_lyric% /\n"
+	"   %netease_lyric_enhanced% / %netease_yrc% 字段与独立歌词窗口（支持逐字高亮）。\n"
 	" · 漫游电台：列表里只放当前一批（3 首）+ 正在播放的那首，播到最后一首自动取下一批，\n"
 	"   已播过的自动删除，可以一直放下去。\n"
 	"\n"
@@ -52,10 +54,12 @@ public:
 		netease::Session::instance().init();
 		netease_app::load_meta_cache();
 		netease_data::recent_local_load();
+		netease_ui::theme_watch_start();   // 跟随 foobar2000 的主题配色
 
 
 	}
 	void on_quit() override {
+		netease_ui::theme_watch_stop();
 		netease_app::save_meta_cache();
 		netease::Session::instance().shutdown();
 		netease_log::write("foo_netease: on_quit()");

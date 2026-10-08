@@ -25,6 +25,12 @@ using LivenessPtr = std::shared_ptr<Liveness>;
 // 把一组曲目写成 netease:// 句柄放进当前播放列表；replace=true 时先清空。
 size_t insert_tracks(const std::vector<netease::TrackInfo> & tracks, bool replace);
 
+// 插到"正在播放"的下一条（右键「下一首播放」）。找不到正在播放就插到最前面。
+size_t insert_tracks_next(const std::vector<netease::TrackInfo> & tracks);
+
+// 加进 foobar2000 的播放队列 —— 这才是真正的"下一首播放"（随机播放下也生效）。
+size_t queue_tracks_next(const std::vector<netease::TrackInfo> & tracks);
+
 struct FeedResult {
 	bool ok = false;
 	std::string error;
@@ -38,6 +44,7 @@ struct PlaylistsResult {
 	std::string nickname;
 	int64_t uid = 0;
 	std::vector<netease::PlaylistInfo> items;
+	int total = 0;   // 服务端报告的总数（playlistCount），供「更多」判断还有没有
 };
 
 // ---- 漫游电台 ----
@@ -53,7 +60,9 @@ bool fm_radio_enabled();
 
 // 把一批漫游曲目写进播放列表：追加新歌，再删掉"正在播放那首之前"的所有旧条目
 // （正在播放的永不删除）。没有正在播放的条目时就只保留这一批。
-size_t sync_fm_playlist(const std::vector<netease::TrackInfo> & batch);
+// new_session=true：用户重新选了漫游（双击）→ 整片替换成这一批；
+// new_session=false：右键「添加」→ 只是追加。
+size_t sync_fm_playlist(const std::vector<netease::TrackInfo> & batch, bool new_session);
 
 // 播放回调调用：判断这一批是否快放完（随机播放下也成立），需要就自动续一批。
 void fm_radio_maybe_extend(metadb_handle_ptr track);
@@ -125,6 +134,11 @@ std::vector<int64_t> recent_local_list();
 
 void search_async(LivenessPtr alive, const std::string & keyword, int offset,
 	std::function<void(FeedResult)> done);
+
+// 搜歌单（只用来在面板上列出来，不写播放列表）。
+// offset = 从第几个开始（「更多」翻页用），首次搜索传 0。
+void search_playlists_async(LivenessPtr alive, const std::string & keyword, int offset,
+	std::function<void(PlaylistsResult)> done);
 
 // 最近播放：服务端的播放记录（POST /weapi/v1/play/record，需要 uid）。
 void load_recent_async(LivenessPtr alive, std::function<void(FeedResult)> done);

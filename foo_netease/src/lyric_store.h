@@ -14,6 +14,12 @@ namespace netease_lyric {
 // 读缓存（快，任意线程）。命中返回 true。
 bool get_cached(int64_t id, std::string & text);
 
+// 增强型（逐字）歌词：转成 A2 格式的 LRC（没有逐字版权时返回 false）。
+bool get_cached_enhanced(int64_t id, std::string & text);
+
+// 网易原始逐字（yrc）文本，原样返回。
+bool get_cached_raw_yrc(int64_t id, std::string & text);
+
 // 后台取一次并缓存；已在缓存里或已有请求在飞就直接返回。
 // path 用于歌词就绪后 metadb_io::dispatch_refresh()，让显示字段刷新。
 // 传空 path 则不派发刷新。

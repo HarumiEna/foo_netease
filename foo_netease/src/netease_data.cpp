@@ -107,8 +107,10 @@ t_size fm_playlist_index(bool create) {
 	return index;
 }
 
-// 追加新歌 + 删掉"正在播放那首之前"的旧条目。调用者必须保证在主线程。
-// new_session = true 表示用户重新选了漫游，此时重置"已播过"的记录。
+// 把一批漫游曲目写进「网易云漫游」播放列表。调用者必须保证在主线程。
+// new_session = true（用户重新选了漫游，即双击面板上的漫游）：**整片替换** ——
+//   列表里只留这一批（正在播放的那首除外），旧会话剩下的歌全部清掉。
+// new_session = false（「更多」按钮 / 自动续批）：**追加**，并删掉确实播过的旧条目。
 void fm_apply_batch(const std::vector<netease::TrackInfo> & batch, bool new_session) {
 	if (batch.empty()) return;
 	if (new_session) g_fm_played.clear();
@@ -152,14 +154,27 @@ void fm_apply_batch(const std::vector<netease::TrackInfo> & batch, bool new_sess
 		if (now.is_valid() && all[i] == now) { now_pos = i; break; }
 	}
 	size_t dropped = 0;
-	if (now_pos != pfc::infinite_size) {
-		// 正在播：只把它之前的（已经播过的）删掉
-		for (t_size i = 0; i < now_pos; ++i) { mask.set(i, true); ++dropped; }
+	(void)now_pos;
+	if (new_session) {
+		// 重新选漫游 = 新会话：只留下刚取回来的这一批，旧会话的歌整片清掉。
+		// （正在播放的那首保留 —— 删了它会立刻打断播放。）
+		// 之前这里只重置 g_fm_played、不删旧条目，于是双击漫游看起来变成了"追加"。
+		for (t_size i = 0; i < all.get_count(); ++i) {
+			if (now.is_valid() && all[i] == now) continue;
+			bool in_fresh = false;
+			for (t_size j = 0; j < fresh.get_count(); ++j) {
+				if (all[i] == fresh[j]) { in_fresh = true; break; }
+			}
+			if (!in_fresh) { mask.set(i, true); ++dropped; }
+		}
 	} else {
-		// 没有在播的：只留下刚加进来的这一批
-		const t_size keep = fresh.get_count();
-		if (all.get_count() > keep) {
-			for (t_size i = 0; i + keep < all.get_count(); ++i) { mask.set(i, true); ++dropped; }
+		// 「更多」/自动续批：只删确实播过的（g_fm_played 里记着），不按位置删。
+		// 以前的做法是"把正在播放之前的都删掉"，假定那些都播过了 ——
+		// 但用户手动往后跳时，前面往往还有没听过的歌，会被一起删掉（已修）。
+		for (t_size i = 0; i < all.get_count(); ++i) {
+			if (now.is_valid() && all[i] == now) continue;
+			const int64_t hid = fm_id_from_path(all[i]->get_path());
+			if (hid != 0 && g_fm_played.count(hid)) { mask.set(i, true); ++dropped; }
 		}
 	}
 	if (dropped) pm->playlist_remove_items(index, mask);
@@ -174,8 +189,15 @@ void fm_apply_batch(const std::vector<netease::TrackInfo> & batch, bool new_sess
 			pm->playlist_get_all_items(index, all2);
 			bit_array_bittable mask2(all2.get_count());
 			size_t to_drop = static_cast<size_t>(count) - kFmMax;
+			// 先删播过的；还不够再从头删（跳过正在播放那首）。这样优先扔掉听过的。
 			for (t_size i = 0; i < all2.get_count() && to_drop > 0; ++i) {
 				if (now.is_valid() && all2[i] == now) continue;
+				const int64_t hid = fm_id_from_path(all2[i]->get_path());
+				if (hid != 0 && g_fm_played.count(hid)) { mask2.set(i, true); --to_drop; }
+			}
+			for (t_size i = 0; i < all2.get_count() && to_drop > 0; ++i) {
+				if (now.is_valid() && all2[i] == now) continue;
+				if (mask2.get(i)) continue;
 				mask2.set(i, true);
 				--to_drop;
 			}
@@ -309,9 +331,9 @@ std::string now_playing_path() {
 	return g_now_path ? *g_now_path : std::string();
 }
 
-size_t sync_fm_playlist(const std::vector<netease::TrackInfo> & batch) {
+size_t sync_fm_playlist(const std::vector<netease::TrackInfo> & batch, bool new_session) {
 	if (batch.empty()) return 0;
-	fm_apply_batch(batch, true);
+	fm_apply_batch(batch, new_session);
 	return batch.size();
 }
 
@@ -366,10 +388,14 @@ void fm_radio_maybe_extend(metadb_handle_ptr track) {
 	}
 
 	if (unplayed_others <= 1) {
-		// 冷却：拿到新歌时 3 秒（用户要求，手动连切时也能很快补上新歌）；
-		// 如果上一批全是"重发的老歌"，说明池子暂时榨干了，退避到 10 秒，
-		// 免得每 3 秒打一次 /radio/get。
-		const int64_t interval = (g_fm_last_batch_fresh.load() == 0) ? 10000 : 3000;
+		// 冷却时间（原 3 秒 / 10 秒太长了：快速切歌时列表会被削到只剩一首，
+		// 冷却期间只能反复播同一首）。现在分三档：
+		//   列表已空 → 0.3 秒（只做防抖，立刻补歌）
+		//   还剩一首在缓冲 → 1 秒
+		//   池子暂时榨干（上批全是老歌） → 5 秒退避，别猛打 /radio/get
+		const int64_t interval = (unplayed_others == 0)
+			? 300
+			: ((g_fm_last_batch_fresh.load() == 0) ? 5000 : 1000);
 		if (!cooldown_ok(g_fm_last_extend_ms, interval)) return;
 		netease_log::write("foo_netease: 漫游本批快放完了（还有 " + std::to_string(unplayed_others) +
 			" 首没播），自动续下一批");
@@ -404,6 +430,59 @@ int64_t parse_playlist_link(const std::string & text) {
 	if (at == std::string::npos) return 0;
 	const int64_t id = std::strtoll(text.c_str() + at + 3, nullptr, 10);
 	return id > 0 ? id : 0;
+}
+
+size_t queue_tracks_next(const std::vector<netease::TrackInfo> & tracks) {
+	if (tracks.empty()) return 0;
+	auto pm = playlist_manager::get();
+	if (!pm.is_valid()) return 0;
+	const std::string level = netease::Session::instance().quality();
+	size_t n = 0;
+	for (size_t i = 0; i < tracks.size(); ++i) {
+		const std::string path = "netease://song/" + std::to_string(tracks[i].id) +
+			"?level=" + level + "&no=" + std::to_string(i + 1);
+		metadb_handle_ptr h = metadb::get()->handle_create(path.c_str(), 0);
+		if (!h.is_valid()) continue;
+		pm->queue_add_item(h);
+		++n;
+	}
+	netease_log::write("foo_netease: 右键「下一首播放」—— 已加入播放队列 " + std::to_string(n) + " 首");
+	return n;
+}
+
+size_t insert_tracks_next(const std::vector<netease::TrackInfo> & tracks) {
+	if (tracks.empty()) return 0;
+	metadb_handle_list handles;
+	const std::string level = netease::Session::instance().quality();
+	for (size_t i = 0; i < tracks.size(); ++i) {
+		const std::string path = "netease://song/" + std::to_string(tracks[i].id) +
+			"?level=" + level + "&no=" + std::to_string(i + 1);
+		handles.add_item(metadb::get()->handle_create(path.c_str(), 0));
+	}
+	auto pm = playlist_manager::get();
+	if (!pm.is_valid() || handles.get_count() == 0) return 0;
+
+	// 插到正在播放那一条的后面；没有正在播放就插到最前面。
+	t_size at = 0;
+	metadb_handle_ptr now;
+	playback_control::get()->get_now_playing(now);
+	const t_size active = pm->get_active_playlist();
+	if (now.is_valid() && active != pfc::infinite_size) {
+		metadb_handle_list all;
+		pm->playlist_get_all_items(active, all);
+		for (t_size i = 0; i < all.get_count(); ++i) {
+			if (all[i] == now) { at = i + 1; break; }
+		}
+	}
+	pm->activeplaylist_insert_items(at, handles, bit_array_false());
+	netease_log::write("foo_netease: 已插入「下一首播放」" + std::to_string(handles.get_count()) +
+		" 首（插在第 " + std::to_string(at + 1) + " 条）");
+	auto io = metadb_io_v2::get();
+	if (io.is_valid()) {
+		io->load_info_async(handles, metadb_io::load_info_force, nullptr,
+			metadb_io_v2::op_flag_silent | metadb_io_v2::op_flag_background, nullptr);
+	}
+	return handles.get_count();
 }
 
 size_t insert_tracks(const std::vector<netease::TrackInfo> & tracks, bool replace) {
@@ -855,6 +934,31 @@ void load_playlist_tracks_async(LivenessPtr alive, int64_t playlist_id,
 	std::function<void(FeedResult)> done) {
 	run_async(alive, done, [playlist_id](netease::NeteaseApi & api) {
 		return load_playlist_tracks(api, playlist_id);
+	});
+}
+
+void search_playlists_async(LivenessPtr alive, const std::string & keyword, int offset,
+	std::function<void(PlaylistsResult)> done) {
+	// 注意：run_async 只支持 FeedResult，这条走和 load_playlists_async 一样的写法。
+	fb2k::splitTask([alive, keyword, offset, done] {
+		PlaylistsResult r;
+		netease::CookieJar jar;
+		std::unique_ptr<netease::NeteaseApi> holder;
+		if (!make_api(jar, holder)) {
+			r.error = "尚未登录（或本地凭据里没有 MUSIC_U）";
+			post_result(alive, done, std::move(r));
+			return;
+		}
+		int total = 0;
+		netease::ApiCall call = holder->search_playlists(keyword, 30, offset, r.items, &total);
+		if (!call.ok) {
+			r.error = call.error.empty() ? "歌单搜索失败" : call.error;
+			post_result(alive, done, std::move(r));
+			return;
+		}
+		r.ok = true;
+		r.total = total;
+		post_result(alive, done, std::move(r));
 	});
 }
 
