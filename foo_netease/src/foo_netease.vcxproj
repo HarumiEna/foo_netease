@@ -227,6 +227,7 @@
     <ClInclude Include="panel_ui.h" />
     <ClInclude Include="session.h" />
     <ClInclude Include="win_utf8.h" />
+    <ClInclude Include="ui_scale.h" />
     <ClInclude Include="core\api.h" />
     <ClInclude Include="core\dpapi.h" />
     <ClInclude Include="core\crypto.h" />

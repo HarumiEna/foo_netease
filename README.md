@@ -6,7 +6,7 @@ foobar2000 的网易云音乐组件：登录账号、浏览歌单、直接播放
 
 [![Stars](https://img.shields.io/github/stars/HarumiEna/foo_netease?style=flat-square&label=Stars&color=blue)](https://github.com/HarumiEna/foo_netease/stargazers) [![Forks](https://img.shields.io/github/forks/HarumiEna/foo_netease?style=flat-square&label=Forks&color=blue)](https://github.com/HarumiEna/foo_netease/forks) [![Downloads](https://img.shields.io/github/downloads/HarumiEna/foo_netease/total?style=flat-square&label=Downloads&color=green)](https://github.com/HarumiEna/foo_netease/releases)
 
-- 版本 **0.18.1** ｜ Windows ｜ foobar2000 **v2.x**（x64 / Win32）
+- 版本 **0.19.0** ｜ Windows ｜ foobar2000 **v2.x**（x64 / Win32）
 - 第三方个人作品，与网易云音乐官方无关
 
 ## 功能
@@ -18,6 +18,7 @@ foobar2000 的网易云音乐组件：登录账号、浏览歌单、直接播放
 - **漫游电台**：无限续播，已播曲目自动移除
 - **封面跟随正在播放**；**歌词**输出到 %netease_lyric% 并提供歌词窗口
 - 元数据缓存、%netease_no% 保留歌单内序号、本机播放记录
+- **界面缩放可调**：默认跟随系统 DPI，4K 屏觉得挤可在设置里再放大（100%/125%/150%/175%/200%），改完立即生效
 
 ## 截图
 

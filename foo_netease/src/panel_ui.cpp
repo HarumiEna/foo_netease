@@ -17,6 +17,7 @@
 #include "lyric_ui.h"
 #include "netease_data.h"
 #include "session.h"
+#include "ui_scale.h"
 #include "win_utf8.h"
 
 #pragma comment(lib, "comctl32.lib")
@@ -85,6 +86,7 @@ public:
 		MSG_WM_CREATE(OnCreate)
 		MSG_WM_DESTROY(OnDestroy)
 		MSG_WM_SIZE(OnSize)
+		MESSAGE_HANDLER(netease_ui::kMsgScaleChanged, OnScaleChanged)
 		MSG_WM_ERASEBKGND(OnEraseBkgnd)
 		MSG_WM_GETMINMAXINFO(OnGetMinMaxInfo)
 		MSG_WM_TIMER(OnTimer)
@@ -105,8 +107,8 @@ private:
 	HWND make(const wchar_t * cls, const wchar_t * text, DWORD style, DWORD ex, int id) {
 		HWND h = ::CreateWindowExW(ex, cls, text, WS_CHILD | WS_VISIBLE | style,
 			0, 0, 10, 10, m_hWnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), nullptr, nullptr);
-		if (h) ::SendMessageW(h, WM_SETFONT,
-			reinterpret_cast<WPARAM>(::GetStockObject(DEFAULT_GUI_FONT)), TRUE);
+		// 字体按窗口 DPI 建，DEFAULT_GUI_FONT 在高 DPI 下不会放大。
+		if (h) ::SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font.get(h)), TRUE);
 		return h;
 	}
 
@@ -179,7 +181,21 @@ private:
 		if (m_alive) m_alive->alive = false;
 	}
 
-	void OnSize(UINT, CSize size) { layout(size.cx, size.cy); }
+	void OnSize(UINT, CSize size) {
+		// 界面缩放改过之后字体要重建，所以重排前先重新取句柄 + 设字体。
+		resolve_controls();
+		layout(size.cx, size.cy);
+	}
+
+	// 设置页改了「界面缩放」：字体和几何都要按新比例重来。
+	LRESULT OnScaleChanged(UINT, WPARAM, LPARAM, BOOL &) {
+		CRect cr;
+		if (GetClientRect(&cr)) {
+			resolve_controls();
+			layout(cr.Width(), cr.Height());
+		}
+		return 0;
+	}
 
 	// 面板里已经没有曲目列表了，所以不需要为它留宽度 —— 可以拖得很小。
 	// （宿主还会问 get_min_max_info()，那个也一起调小。）
@@ -200,50 +216,58 @@ private:
 		const HWND all[] = { m_search, m_searchBtn, m_refresh, m_more, m_lyric, m_autoFm,
 			m_source, m_status };
 		for (HWND h : all) {
-			if (h) ::SendMessageW(h, WM_SETFONT,
-				reinterpret_cast<WPARAM>(::GetStockObject(DEFAULT_GUI_FONT)), TRUE);
+			if (h) ::SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(m_font.get(h)), TRUE);
 		}
 	}
 
 	void layout(int cx, int cy) {
 		if (cx <= 0 || cy <= 0) return;
-		const int m = 6;
-		const int rowH = 23;
-		const int btnW = 52;
-		const int cbW = 148;
+		// 所有尺寸都按窗口 DPI 缩放：4K 屏上不缩的话又小又挤。
+		const int m = netease_ui::scale(m_hWnd, 6);
+		const int rowH = netease_ui::scale(m_hWnd, 23);
+		const int btnW = netease_ui::scale(m_hWnd, 52);
+		const int cbW = netease_ui::scale(m_hWnd, 148);
+		const int gap = netease_ui::scale(m_hWnd, 4);
 
 		// 自适应：宽度够就一行，不够就把按钮换到第二行 —— 面板可以拖得很窄。
 		int y = m;
-		int searchW = cx - 2 * m - btnW - 8;
-		if (searchW < 70) searchW = 70;
+		int searchW = cx - 2 * m - btnW - netease_ui::scale(m_hWnd, 8);
+		if (searchW < netease_ui::scale(m_hWnd, 70)) searchW = netease_ui::scale(m_hWnd, 70);
 		move(m_search, m, y, searchW, rowH);
 		move(m_searchBtn, cx - m - btnW, y, btnW, rowH);
 
-		const int restW = btnW * 3 + 12 + cbW;
-		if (m + searchW + 8 + restW <= cx - m) {
-			int bx = m + searchW + 8;
-			move(m_refresh, bx, y, btnW, rowH); bx += btnW + 4;
-			move(m_more, bx, y, btnW, rowH); bx += btnW + 4;
-			move(m_lyric, bx, y, btnW, rowH); bx += btnW + 6;
+		const int restW = btnW * 3 + netease_ui::scale(m_hWnd, 12) + cbW;
+		if (m + searchW + netease_ui::scale(m_hWnd, 8) + restW <= cx - m) {
+			int bx = m + searchW + netease_ui::scale(m_hWnd, 8);
+			move(m_refresh, bx, y, btnW, rowH); bx += btnW + gap;
+			move(m_more, bx, y, btnW, rowH); bx += btnW + gap;
+			move(m_lyric, bx, y, btnW, rowH); bx += btnW + netease_ui::scale(m_hWnd, 6);
 			move(m_autoFm, bx, y, cbW, rowH);
 		} else {
-			y += rowH + 4;
+			y += rowH + gap;
 			int bx = m;
-			move(m_refresh, bx, y, btnW, rowH); bx += btnW + 4;
-			move(m_more, bx, y, btnW, rowH); bx += btnW + 4;
-			move(m_lyric, bx, y, btnW, rowH); bx += btnW + 6;
+			move(m_refresh, bx, y, btnW, rowH); bx += btnW + gap;
+			move(m_more, bx, y, btnW, rowH); bx += btnW + gap;
+			move(m_lyric, bx, y, btnW, rowH); bx += btnW + netease_ui::scale(m_hWnd, 6);
 			int w2 = cx - m - bx;
 			if (w2 > cbW) w2 = cbW;
-			if (w2 < 60) w2 = 60;
+			if (w2 < netease_ui::scale(m_hWnd, 60)) w2 = netease_ui::scale(m_hWnd, 60);
 			move(m_autoFm, bx, y, w2, rowH);
 		}
 
-		const int top = y + rowH + 6;
-		const int bottomH = 18 + 6 + m;
+		const int top = y + rowH + netease_ui::scale(m_hWnd, 6);
+		const int bottomH = netease_ui::scale(m_hWnd, 18 + 6) + m;
 		int listH = cy - top - bottomH;
-		if (listH < 40) listH = 40;
+		if (listH < netease_ui::scale(m_hWnd, 40)) listH = netease_ui::scale(m_hWnd, 40);
 		move(m_source, m, top, cx - 2 * m, listH);
-		move(m_status, m, top + listH + 4, cx - 2 * m, 18);
+		move(m_status, m, top + listH + gap, cx - 2 * m, netease_ui::scale(m_hWnd, 18));
+
+
+		// 行距：LISTBOX 的行高默认只跟字体等高，高 DPI 下会显得挤，
+		// 这里显式给出行高（字号 + 一点呼吸空间）。
+		if (m_source) {
+			::SendMessageW(m_source, LB_SETITEMHEIGHT, 0, netease_ui::scale(m_hWnd, 22));
+		}
 	}
 
 	void move(HWND h, int x, int y, int cx, int cy) {
@@ -536,6 +560,7 @@ private:
 	HWND m_lyric = nullptr;
 	HWND m_autoFm = nullptr;
 	HWND m_source = nullptr;
+	netease_ui::FontCache m_font;
 	HWND m_status = nullptr;
 
 	fb2k::CDarkModeHooks m_dark;

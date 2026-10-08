@@ -10,7 +10,7 @@
 // 组件标识。
 DECLARE_COMPONENT_VERSION(
 	"网易云音乐 (Netease Cloud Music)",
-	"0.18.1",
+	"0.19.0",
 	"在 foobar2000 内登录网易云音乐账号、浏览歌单并直接播放。\n"
 	"\n"
 	"功能：\n"

@@ -12,9 +12,14 @@
 #include "browse_ui.h"
 #include "panel_ui.h"
 #include "session.h"
+#include "ui_scale.h"
 #include "win_utf8.h"
 
 namespace {
+
+// 界面缩放档位（百分比；100 = 完全跟随系统 DPI）。
+const int kScales[] = { 100, 125, 150, 175, 200 };
+const int kScaleCount = static_cast<int>(sizeof(kScales) / sizeof(kScales[0]));
 
 constexpr GUID guid_prefs_main = { 0x2ff5dddc, 0x593e, 0x4e97, { 0x8f, 0xb5, 0x97, 0x1e, 0xe7, 0x58, 0x09, 0x30 } };
 
@@ -51,6 +56,7 @@ public:
 		COMMAND_HANDLER_EX(IDC_NETEASE_COVER_NOW, BN_CLICKED, OnCoverNow)
 		COMMAND_HANDLER_EX(IDC_NETEASE_FOLLOW_CURSOR, BN_CLICKED, OnFollowCursor)
 		COMMAND_HANDLER_EX(IDC_NETEASE_QUALITY, CBN_SELCHANGE, OnQualityChanged)
+		COMMAND_HANDLER_EX(IDC_NETEASE_SCALE, CBN_SELCHANGE, OnScaleChanged)
 	END_MSG_MAP()
 
 private:
@@ -87,6 +93,20 @@ private:
 			if (current == netease::kQualityOptions[i].level) selected = static_cast<int>(i);
 		}
 		::SendMessageW(quality, CB_SETCURSEL, selected, 0);
+
+		// 界面缩放：4K 屏上默认的 DPI 缩放可能还是偏挤，这里让用户自己再加一点。
+		SetDlgItemText(IDC_NETEASE_SCALE_LBL, netease::to_wide("界面缩放：").c_str());
+		const HWND scaleBox = ::GetDlgItem(m_hWnd, IDC_NETEASE_SCALE);
+		const int current_scale = netease_ui::user_scale_percent();
+		int scale_sel = 0;
+		for (int i = 0; i < kScaleCount; ++i) {
+			const std::wstring label = (i == 0)
+				? netease::to_wide("100%（跟随系统 DPI）")
+				: (std::to_wstring(kScales[i]) + L"%");
+			::SendMessageW(scaleBox, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+			if (kScales[i] == current_scale) scale_sel = i;
+		}
+		::SendMessageW(scaleBox, CB_SETCURSEL, scale_sel, 0);
 
 		refresh();
 		return FALSE; // 焦点由我们自己控制
@@ -150,6 +170,16 @@ private:
 			netease::Session::instance().set_quality(netease::kQualityOptions[index].level);
 			log_line(std::string("foo_netease: 音质设置为 ") + netease::kQualityOptions[index].level);
 		}
+	}
+
+	void OnScaleChanged(UINT, int, CWindow) {
+		const int index = static_cast<int>(::SendMessageW(
+			::GetDlgItem(m_hWnd, IDC_NETEASE_SCALE), CB_GETCURSEL, 0, 0));
+		if (index < 0 || index >= kScaleCount) return;
+		netease_ui::set_user_scale_percent(kScales[index]);
+		// 立刻让已经打开的窗口按新缩放重排，不用重启 foobar2000。
+		netease_ui::notify_scale_changed();
+		log_line("foo_netease: 界面缩放设为 " + std::to_string(kScales[index]) + "%");
 	}
 
 	void refresh() {

@@ -17,6 +17,7 @@
 #include "netease_data.h"
 #include "resource.h"
 #include "session.h"
+#include "ui_scale.h"
 #include "win_utf8.h"
 
 #pragma comment(lib, "comctl32.lib")
@@ -64,6 +65,7 @@ public:
 		MSG_WM_INITDIALOG(OnInitDialog)
 		MSG_WM_DESTROY(OnDestroy)
 		MSG_WM_SIZE(OnSize)
+		MESSAGE_HANDLER(netease_ui::kMsgScaleChanged, OnScaleChanged)
 		MSG_WM_GETMINMAXINFO(OnGetMinMaxInfo)
 		MSG_WM_CLOSE(OnClose)
 		COMMAND_ID_HANDLER_EX(IDCANCEL, OnCancel)
@@ -83,6 +85,8 @@ private:
 		SetDlgItemText(IDC_BROWSE_ADD, netease::to_wide("添加到当前播放列表").c_str());
 		SetDlgItemText(IDC_BROWSE_REPLACE, netease::to_wide("替换当前播放列表").c_str());
 		m_dark.AddDialogWithControls(*this);
+
+		apply_fonts();
 
 		setup_track_columns();
 
@@ -108,18 +112,38 @@ private:
 
 	void OnDestroy() {
 		if (m_alive) m_alive->alive = false;
+		if (m_rowImages) { ImageList_Destroy(m_rowImages); m_rowImages = nullptr; }
 	}
 
 	void OnSize(UINT, CSize size) {
+		apply_fonts();
 		layout(size.cx, size.cy);
 	}
 
+	// 设置页改了「界面缩放」：重新设字体 + 重排，不用重启。
+	LRESULT OnScaleChanged(UINT, WPARAM, LPARAM, BOOL &) {
+		CRect cr;
+		if (GetClientRect(&cr)) {
+			apply_fonts();
+			layout(cr.Width(), cr.Height());
+		}
+		return 0;
+	}
+
 	void OnGetMinMaxInfo(LPMINMAXINFO info) {
-		info->ptMinTrackSize.x = 560;
-		info->ptMinTrackSize.y = 320;
+		info->ptMinTrackSize.x = netease_ui::scale(m_hWnd, 560);
+		info->ptMinTrackSize.y = netease_ui::scale(m_hWnd, 320);
 	}
 
 	// ---- 界面搭建 ----
+
+	// 控件字体按「系统 DPI × 用户缩放」设置：4K 屏下行距才不会被压得又小又挤。
+	void apply_fonts() {
+		HFONT font = m_font.get(m_hWnd);
+		for (HWND h = ::GetWindow(m_hWnd, GW_CHILD); h; h = ::GetWindow(h, GW_HWNDNEXT)) {
+			::SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+		}
+	}
 
 	void setup_track_columns() {
 		HWND list = ::GetDlgItem(m_hWnd, IDC_BROWSE_TRACKS);
@@ -132,36 +156,54 @@ private:
 		for (int i = 0; i < 5; ++i) {
 			LVCOLUMNW col{};
 			col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-			col.cx = columns[i].width;
+			col.cx = netease_ui::scale(m_hWnd, columns[i].width);
 			col.iSubItem = i;
 			col.pszText = const_cast<LPWSTR>(columns[i].text);
 			::SendMessageW(list, LVM_INSERTCOLUMNW, static_cast<WPARAM>(i),
 				reinterpret_cast<LPARAM>(&col));
 		}
+
+		// 行距：report 视图的行高只跟字体走，高 DPI 下显得挤。挂一个 1 像素宽、
+		// 指定高度的小图标列表，行高就跟着它走（这是 ListView 的常规做法）。
+		if (m_rowImages) { ImageList_Destroy(m_rowImages); m_rowImages = nullptr; }
+		m_rowImages = ImageList_Create(1, netease_ui::scale(m_hWnd, 24), ILC_COLOR32, 0, 1);
+		if (m_rowImages) {
+			::SendMessageW(list, LVM_SETIMAGELIST, LVSIL_SMALL,
+				reinterpret_cast<LPARAM>(m_rowImages));
+		}
 	}
 
 	void layout(int cx, int cy) {
-		const int margin = 8;
-		const int left_w = 208;
-		const int bottom = 34;
+		// 全部按窗口 DPI 缩放：4K 屏上不缩的话又小又挤（issue #1）。
+		const int margin = netease_ui::scale(m_hWnd, 8);
+		const int left_w = netease_ui::scale(m_hWnd, 208);
+		const int bottom = netease_ui::scale(m_hWnd, 34);
+		const int top = netease_ui::scale(m_hWnd, 30);
 
-		::SetWindowPos(::GetDlgItem(m_hWnd, IDC_BROWSE_PLAYLISTS), nullptr, margin, 30,
-			left_w, cy - 30 - margin * 2, SWP_NOZORDER);
-		const int right_x = margin + left_w + 12;
+		::SetWindowPos(::GetDlgItem(m_hWnd, IDC_BROWSE_PLAYLISTS), nullptr, margin, top,
+			left_w, cy - top - margin * 2, SWP_NOZORDER);
+		const int right_x = margin + left_w + netease_ui::scale(m_hWnd, 12);
 		const int right_w = cx - right_x - margin;
-		if (right_w < 120) return;
+		if (right_w < netease_ui::scale(m_hWnd, 120)) return;
 
-		::SetWindowPos(::GetDlgItem(m_hWnd, IDC_BROWSE_SEARCH), nullptr, right_x, 10,
-			right_w - 122, 22, SWP_NOZORDER);
-		::SetWindowPos(::GetDlgItem(m_hWnd, IDC_BROWSE_SEARCH_BTN), nullptr, right_x + right_w - 116, 9, 54, 23, SWP_NOZORDER);
-		::SetWindowPos(::GetDlgItem(m_hWnd, IDC_BROWSE_REFRESH), nullptr, right_x + right_w - 56, 9, 56, 23, SWP_NOZORDER);
-		::SetWindowPos(::GetDlgItem(m_hWnd, IDC_BROWSE_TRACKS), nullptr, right_x, 36,
-			right_w, cy - 36 - bottom - margin, SWP_NOZORDER);
-		::SetWindowPos(::GetDlgItem(m_hWnd, IDC_BROWSE_STATUS), nullptr, right_x, cy - bottom - 20,
-			right_w, 16, SWP_NOZORDER);
-		::SetWindowPos(::GetDlgItem(m_hWnd, IDC_BROWSE_ADD), nullptr, right_x, cy - 26, 104, 22, SWP_NOZORDER);
-		::SetWindowPos(::GetDlgItem(m_hWnd, IDC_BROWSE_REPLACE), nullptr, right_x + 112, cy - 26, 116, 22, SWP_NOZORDER);
-	}
+		::SetWindowPos(::GetDlgItem(m_hWnd, IDC_BROWSE_SEARCH), nullptr, right_x, netease_ui::scale(m_hWnd, 10),
+			right_w - netease_ui::scale(m_hWnd, 122), netease_ui::scale(m_hWnd, 22), SWP_NOZORDER);
+		::SetWindowPos(::GetDlgItem(m_hWnd, IDC_BROWSE_SEARCH_BTN), nullptr,
+			right_x + right_w - netease_ui::scale(m_hWnd, 116), netease_ui::scale(m_hWnd, 9),
+			netease_ui::scale(m_hWnd, 54), netease_ui::scale(m_hWnd, 23), SWP_NOZORDER);
+		::SetWindowPos(::GetDlgItem(m_hWnd, IDC_BROWSE_REFRESH), nullptr,
+			right_x + right_w - netease_ui::scale(m_hWnd, 56), netease_ui::scale(m_hWnd, 9),
+			netease_ui::scale(m_hWnd, 56), netease_ui::scale(m_hWnd, 23), SWP_NOZORDER);
+		::SetWindowPos(::GetDlgItem(m_hWnd, IDC_BROWSE_TRACKS), nullptr, right_x, netease_ui::scale(m_hWnd, 36),
+			right_w, cy - netease_ui::scale(m_hWnd, 36) - bottom - margin, SWP_NOZORDER);
+		::SetWindowPos(::GetDlgItem(m_hWnd, IDC_BROWSE_STATUS), nullptr, right_x,
+			cy - bottom - netease_ui::scale(m_hWnd, 20), right_w, netease_ui::scale(m_hWnd, 16), SWP_NOZORDER);
+		::SetWindowPos(::GetDlgItem(m_hWnd, IDC_BROWSE_ADD), nullptr, right_x,
+			cy - netease_ui::scale(m_hWnd, 26), netease_ui::scale(m_hWnd, 104), netease_ui::scale(m_hWnd, 22), SWP_NOZORDER);
+		::SetWindowPos(::GetDlgItem(m_hWnd, IDC_BROWSE_REPLACE), nullptr,
+			right_x + netease_ui::scale(m_hWnd, 112), cy - netease_ui::scale(m_hWnd, 26),
+			netease_ui::scale(m_hWnd, 116), netease_ui::scale(m_hWnd, 22), SWP_NOZORDER);
+}
 
 	// ---- 数据加载（全部在工作线程，结果投递回主线程） ----
 
@@ -443,6 +485,8 @@ private:
 	std::vector<netease::PlaylistInfo> m_playlists;
 	std::vector<netease::TrackInfo> m_tracks;
 	fb2k::CDarkModeHooks m_dark;
+	HIMAGELIST m_rowImages = nullptr;
+	netease_ui::FontCache m_font;
 };
 
 BrowseWindow * BrowseWindow::s_instance = nullptr;
