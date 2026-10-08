@@ -6,7 +6,7 @@ foobar2000 的网易云音乐组件：登录账号、浏览歌单、直接播放
 
 [![Stars](https://img.shields.io/github/stars/HarumiEna/foo_netease?style=flat-square&label=Stars&color=blue)](https://github.com/HarumiEna/foo_netease/stargazers) [![Forks](https://img.shields.io/github/forks/HarumiEna/foo_netease?style=flat-square&label=Forks&color=blue)](https://github.com/HarumiEna/foo_netease/forks) [![Downloads](https://img.shields.io/github/downloads/HarumiEna/foo_netease/total?style=flat-square&label=Downloads&color=green)](https://github.com/HarumiEna/foo_netease/releases)
 
-- 版本 **0.20.0** ｜ Windows ｜ foobar2000 **v2.x**（x64 / Win32）
+- 版本 **0.21.0** ｜ Windows ｜ foobar2000 **v2.x**（x64 / Win32）
 - 第三方个人作品，与网易云音乐官方无关
 
 ## 功能
@@ -16,6 +16,7 @@ foobar2000 的网易云音乐组件：登录账号、浏览歌单、直接播放
 - **歌单浏览窗口**：浏览歌单与曲目，添加或替换到当前播放列表；面板右键可在新窗口里只显示某一个歌单
 - **播放**：组件自己拉流，不依赖官方客户端，支持云盘 Hi-Res；状态栏显示真实码率 / 采样率 / 位深 / 编码
 - **播放列表右键「下一首播放」**：加进 foobar2000 播放队列（随机播放下也生效）
+- **播放列表右键「切换音质」**：按歌曲当前账号能播的档位列出选项，不支持的档位不会出现；原地改档，列表位置与序号不变，正在播放的那首改完自动重开并接着播、进度不丢；云盘上传的曲子（档位对它们无效）不显示这一项
 - **漫游电台**：无限续播，只移除确实播过的曲目（手动往后跳不再误删没听过的），歌快放完时立刻补下一批
 - **封面跟随正在播放**；**歌词**输出到 %netease_lyric% / %netease_lyric_enhanced% / %netease_yrc% 并提供歌词窗口；有逐字版权时输出增强型（逐字）歌词，歌词窗口逐字高亮
 - 元数据缓存、%netease_no% 保留歌单内序号、本机播放记录

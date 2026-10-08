@@ -6,6 +6,7 @@
 
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "core/http.h"
@@ -195,6 +196,12 @@ public:
 	// 顺序：hires -> lossless -> exhigh -> higher -> standard
 	SongUrlInfo song_url_with_fallback(int64_t id, const std::string & preferred_level,
 		std::string * used_level = nullptr);
+
+	// 每首歌「当前账号能播到的最高音质档位」。
+	// 走 /weapi/song/enhance/privilege，取 playMaxBrLevel（缺失时按 playMaxbr 码率换算）。
+	// 右键「切换音质」靠它只列出真的能选的档位；level 为空 = 这首查不到（无版权 / 无字段）。
+	ApiCall song_privileges(const std::vector<int64_t> & ids,
+		std::vector<std::pair<int64_t, std::string>> & out);
 
 
 	CookieJar & jar() { return m_jar; }

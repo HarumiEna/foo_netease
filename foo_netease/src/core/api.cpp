@@ -271,6 +271,87 @@ SongUrlInfo NeteaseApi::song_url_with_fallback(int64_t id, const std::string & p
 }
 
 
+// privilege 里的档位名归一到我们自己的 5 档。
+// 只认自己档位表里的名字：jyeffect / sky / jymaster / none 这些要么是独立档位、
+// 要么表示拿不到，一律改看码率换算，免得把"沉浸环绕声"错当成 hires。
+static std::string level_from_privilege(const json::Value & p) {
+	const auto known = [](const std::string & s) {
+		return s == "standard" || s == "higher" || s == "exhigh" ||
+			s == "lossless" || s == "hires";
+	};
+
+	// playMaxBrLevel 是"这个账号能播到的最高档"，以它为准。
+	// 它等于 none 表示**没有可播的正规档位** —— 云盘上传的曲子就长这样
+	// （实测：playMaxBrLevel=none、playMaxbr=0、直链接口直接 404），
+	// 这时返回空，菜单整项不显示。不这么办就会退到 maxbr 去换算，凭空
+	// 显示出一个「标准」选项，而切过去根本没有意义。
+	const json::Value * play = p.find("playMaxBrLevel");
+	if (play) {
+		const std::string s = play->as_string();
+		if (s == "none") return std::string();
+		if (known(s)) return s;
+		// 表外的新档位名（jyeffect / sky / jymaster …）：落到下面按码率归一。
+	} else {
+		// 没有 playMaxBrLevel（旧接口）时才退到其它档位字段。
+		static const char * kNames[] = { "maxBrLevel", "downloadMaxBrLevel" };
+		for (const char * f : kNames) {
+			const json::Value * v = p.find(f);
+			if (!v) continue;
+			const std::string s = v->as_string();
+			if (s == "none") return std::string();
+			if (known(s)) return s;
+		}
+	}
+	int64_t br = 0;
+	static const char * kBrs[] = { "playMaxbr", "maxbr", "downloadMaxbr" };
+	for (const char * f : kBrs) {
+		const json::Value * v = p.find(f);
+		if (!v) continue;
+		const int64_t one = v->as_int64();
+		if (one > br) br = one;
+	}
+	if (br >= 1000000) return "hires";
+	if (br >= 900000) return "lossless";
+	if (br >= 320000) return "exhigh";
+	if (br >= 160000) return "higher";
+	if (br > 0) return "standard";
+	return std::string();
+}
+
+ApiCall NeteaseApi::song_privileges(const std::vector<int64_t> & ids,
+	std::vector<std::pair<int64_t, std::string>> & out) {
+	out.clear();
+	ApiCall call;
+	call.ok = true;
+	if (ids.empty()) return call;
+
+	// ids 走 JSON 数组字符串（和 /v3/song/detail 的 c 字段一个套路）。
+	std::string arr = "[";
+	for (size_t i = 0; i < ids.size(); ++i) {
+		if (i) arr += ",";
+		arr += std::to_string(ids[i]);
+	}
+	arr += "]";
+	call = weapi_post("/song/enhance/privilege",
+		"{\"ids\":\"" + json::escape(arr) + "\",\"csrf_token\":\"\"}");
+	if (!call.ok) return call;
+
+	const json::Value * data = call.json.find("data");
+	if (!data || !data->is_array()) {
+		call.ok = false;
+		call.error = "privilege 响应里没有 data 数组：" + call.raw_body;
+		return call;
+	}
+	for (size_t i = 0; i < data->size(); ++i) {
+		const json::Value * one = data->at(i);
+		if (!one) continue;
+		const json::Value * idv = one->find("id");
+		if (!idv) continue;
+		out.emplace_back(idv->as_int64(), level_from_privilege(*one));
+	}
+	return call;
+}
+
 // 从 [{name:...}, ...] 里拼出 "a/b/c"；新旧两套 schema 的歌手数组都是这个形状。
 static std::string join_names(const json::Value * array) {
 	std::string out;

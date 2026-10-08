@@ -131,9 +131,15 @@ private:
 		const int64_t total = m_stream->total_size();
 		if (total > 0) m_size = total;
 
-		if (!m_open_logged) {
+		// 首次打开记一次。之后"从非 0 位置重开"就是解码器在跳转 —— 换音质后回跳、
+		// 拖进度、解码器回头读帧头都算。判断"换音质后接着播"有没有真的落点就看这条
+		// （每个文件对象最多记 4 条，免得解码器来回蹭位置把日志刷满）。
+		if (!m_open_logged || (m_pos > 0 && m_reopen_log < 4)) {
+			const bool first = !m_open_logged;
 			m_open_logged = true;
-			netease_log::write("foo_netease: [自建流] 打开 HTTP " + std::to_string(m_stream->status()) +
+			if (!first) ++m_reopen_log;
+			netease_log::write("foo_netease: [自建流] " + std::string(first ? "打开" : "跳转重开") +
+				" HTTP " + std::to_string(m_stream->status()) +
 				(m_stream->range_ignored() ? "（服务端忽略 Range，顺序读取）" : "") +
 				" 起点=" + std::to_string(m_pos) +
 				" 总长=" + (m_size >= 0 ? std::to_string(m_size) : std::string("未知")));
@@ -161,6 +167,7 @@ private:
 	uint64_t m_pos = 0;         // 逻辑读位置（file 的游标）
 	int64_t m_size = -1;        // 总长度，未知为 -1
 	std::string m_last_error;
+	int m_reopen_log = 0;       // 已打过几次"跳转重开"
 	int m_read_log = 0;         // 已打过几次"解码器读取"
 	int m_error_log = 0;        // 已打过几次错误
 	bool m_open_logged = false; // 本文件对象是否已记录过连接信息

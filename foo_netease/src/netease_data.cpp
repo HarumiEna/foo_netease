@@ -331,6 +331,122 @@ std::string now_playing_path() {
 	return g_now_path ? *g_now_path : std::string();
 }
 
+namespace {
+
+// 每首歌"能切换哪些档位"的缓存。右键菜单同步构建，只能靠缓存避免每次都联网。
+std::mutex g_level_mutex;
+struct LevelCacheEntry {
+	std::string top;
+	bool hidden = false;      // 判为"档位对这首不起作用"（云盘上传的曲子）
+	int64_t at_ms = 0;
+};
+std::unordered_map<int64_t, LevelCacheEntry> g_level_cache;
+const int64_t kLevelTtlOkMs = 30 * 60 * 1000;   // 查到了：半小时（会员状态可能变）
+const int64_t kLevelTtlFailMs = 30 * 1000;      // 没查到：半分钟就允许重试
+
+int64_t tick_ms() { return static_cast<int64_t>(::GetTickCount64()); }
+
+// top 档位名 → "从最低档到 top"的档位列表。表外的名字一律返回空。
+std::vector<std::string> levels_up_to(const std::string & top) {
+	std::vector<std::string> out;
+	if (top.empty()) return out;
+	for (size_t i = 0; i < netease::kQualityOptionCount; ++i) {
+		out.push_back(netease::kQualityOptions[i].level);
+		if (top == netease::kQualityOptions[i].level) return out;
+	}
+	out.clear();   // 服务器给了我们表里没有的档位名：宁可什么都不列，也不列错的
+	return out;
+}
+
+} // namespace
+
+std::vector<std::string> available_levels(int64_t song_id) {
+	if (song_id <= 0) return {};
+	{
+		std::lock_guard<std::mutex> lock(g_level_mutex);
+		auto it = g_level_cache.find(song_id);
+		if (it != g_level_cache.end()) {
+			const bool known = it->second.hidden || !it->second.top.empty();
+			const int64_t ttl = known ? kLevelTtlOkMs : kLevelTtlFailMs;
+			if (tick_ms() - it->second.at_ms < ttl) {
+				return it->second.hidden ? std::vector<std::string>() : levels_up_to(it->second.top);
+			}
+		}
+	}
+
+	std::string top;
+	bool hidden = false;
+	try {
+		netease::CookieJar jar;
+		jar.deserialize(netease::Session::instance().cookie_header());
+		netease::NeteaseApi api(jar, 5000);   // 菜单里等太久不行，超时给短一点
+		std::vector<std::pair<int64_t, std::string>> got;
+		const netease::ApiCall call = api.song_privileges({ song_id }, got);
+		if (call.ok) {
+			for (const auto & kv : got) {
+				if (kv.first == song_id) { top = kv.second; break; }
+			}
+			netease_log::write("foo_netease: 查音质档位 id=" + std::to_string(song_id) +
+				" → 最高档=" + (top.empty() ? std::string("(无)") : top));
+
+			// 云盘上传的曲子：服务端**忽略请求的档位**，任何档位都回同一份云盘原文件。
+			// 实测 id=28812027（用户确认是云盘歌）：请求 standard 仍然回
+			// 档位=lossless / 942 kbps FLAC / 同一份 37 MB 的流；而普通歌 190072
+			// 请求 standard 老老实实回 128 kbps mp3。
+			// 判据：拿最低档试一次，回来的不是 standard（或码率远超标称）就当云盘，
+			// 整项隐藏 —— 这种歌"切换档位"没有任何效果，列出来只会误导。
+			if (!top.empty()) {
+				const netease::SongUrlInfo probe = api.song_url(song_id, "standard");
+				if (!probe.url.empty() &&
+					(probe.level != "standard" || probe.br > 400000)) {
+					hidden = true;
+					netease_log::write("foo_netease: 查音质档位 id=" + std::to_string(song_id) +
+						" → 试 standard 拿到 档位=" + probe.level +
+						" 码率=" + std::to_string(probe.br) +
+						"，判定为云盘曲目（档位对它无效）→ 隐藏「切换音质」");
+				}
+			}
+		} else {
+			netease_log::write("foo_netease: 查音质档位失败 id=" + std::to_string(song_id) +
+				" —— " + call.error);
+		}
+	} catch (const std::exception & ex) {
+		netease_log::write(std::string("foo_netease: 查音质档位异常 id=") +
+			std::to_string(song_id) + " —— " + ex.what());
+		top.clear();
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(g_level_mutex);
+		LevelCacheEntry & e = g_level_cache[song_id];
+		e.top = top;
+		e.hidden = hidden;
+		e.at_ms = tick_ms();
+	}
+	if (hidden) return {};
+	return levels_up_to(top);
+}
+
+namespace {
+std::mutex g_resume_mutex;
+std::unordered_map<std::string, double> g_resume_pos;
+} // namespace
+
+void set_resume_position(const std::string & path, double seconds) {
+	if (path.empty()) return;
+	std::lock_guard<std::mutex> lock(g_resume_mutex);
+	g_resume_pos[path] = seconds;
+}
+
+double take_resume_position(const std::string & path) {
+	std::lock_guard<std::mutex> lock(g_resume_mutex);
+	auto it = g_resume_pos.find(path);
+	if (it == g_resume_pos.end()) return 0.0;
+	const double seconds = it->second;
+	g_resume_pos.erase(it);
+	return seconds;
+}
+
 size_t sync_fm_playlist(const std::vector<netease::TrackInfo> & batch, bool new_session) {
 	if (batch.empty()) return 0;
 	fm_apply_batch(batch, new_session);

@@ -27,6 +27,25 @@ public:
 		if (p_track.is_valid()) {
 			const char * path = p_track->get_path();
 			netease_data::set_now_playing_path(path ? path : "");
+			// 换音质重开的：跳回换之前的进度，否则会从 0 重放。
+			//
+			// 注意：**不能在这里直接 seek**。on_playback_new_track 本身就是播放核心
+			// 的回调，此时重入 playback_seek 会崩（实测 failure_00000008：
+			// app_mainloop=>main_thread_callback::callback_run=>on_playback_new_track）。
+			// fb2k::inMainThread 一定是排队投递（会内联的是 inMainThread2），
+			// 等这次回调退出去、播放核心状态稳定了再跳。
+			if (path) {
+				const double resume = netease_data::take_resume_position(path);
+				if (resume > 0.5) {
+					fb2k::inMainThread([resume] {
+						auto pc = playback_control::get();
+						if (!pc.is_valid()) return;
+						pc->playback_seek(resume);
+						netease_log::write("foo_netease: 换音质后接着播 —— 跳回 " +
+							std::to_string(static_cast<int>(resume)) + " 秒");
+					});
+				}
+			}
 			// 立刻后台预取封面：切歌会取消未完成的封面请求，不预取的话
 			// 封面就会停在旧图上（"切歌时封面不切换"）。
 			const char prefix[] = "netease://song/";

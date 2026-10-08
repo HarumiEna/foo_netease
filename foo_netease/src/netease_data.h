@@ -31,6 +31,22 @@ size_t insert_tracks_next(const std::vector<netease::TrackInfo> & tracks);
 // 加进 foobar2000 的播放队列 —— 这才是真正的"下一首播放"（随机播放下也生效）。
 size_t queue_tracks_next(const std::vector<netease::TrackInfo> & tracks);
 
+// 该曲目「当前账号可播」的音质档位（低 → 高，取值就是 netease::kQualityOptions 的 level）。
+//
+// **同步**返回，这是有意的：上下文菜单是同步构建的，要"不显示不支持的档位"就必须
+// 在构建那一刻就知道答案，没法等异步回调。首次会联网查一次 /song/enhance/privilege，
+// 之后按 id 缓存（成功 30 分钟，失败 30 秒就允许重试）。返回空 = 查不到。
+// 这首歌当前能切换的档位（从低到高）。空 = 整项不显示，包括两种情况：
+//  · 服务器说这首没有可播的正规档位（playMaxBrLevel=none）；
+//  · 云盘上传的曲子 —— 服务端忽略请求的档位，试最低档也会回云端原文件，
+//    切档位没有任何效果，所以也隐藏。
+std::vector<std::string> available_levels(int64_t song_id);
+
+// 换音质要重新打开这一条（直链是按档位签的，换档就得换链），起点得保住：
+// 记下「路径 → 秒数」，等这条真的开始播时再跳回去（见 radio_callback）。
+void set_resume_position(const std::string & path, double seconds);
+double take_resume_position(const std::string & path);   // 取走即清，别影响下一次正常播放
+
 struct FeedResult {
 	bool ok = false;
 	std::string error;
