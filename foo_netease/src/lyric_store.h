@@ -28,9 +28,16 @@ void ensure_async(int64_t id, const std::string & path);
 // 同步取（调用方必须自己保证不在主线程做网络）。成功时写缓存并返回 true。
 bool fetch_now(int64_t id, std::string & text);
 
-// 歌词落盘目录：<profile>\foo_netease_lyrics
-// 把它填进歌词显示器的「本地歌词文件夹」，就能显示我们抓到的歌词。
+// 歌词落盘目录：<profile>\lyrics —— 这**就是 ESLyric 的默认本地歌词目录**
+//（它内部写死的 "%fb2k_profile_path%lyrics"），所以不用让用户配任何东西。
 std::string lrc_dir();
+
+// 启动时扫一遍清单，删掉太久没写过的 .lrc（只删本组件写过的，见下）。
+// 另外：这些 .lrc 已经写好后，<profile>\lyrics 里就有对应的文件了。
+void cleanup_lrc_files();
+
+// 把本组件写过的 .lrc 全部删掉（「清除全部数据」用；目录里别家的歌词不动）。
+void purge_lrc_files();
 
 // 把歌词写成「<歌手> - <标题>.lrc」（每个 id 只写一次）。
 // 编码为带 BOM 的 UTF-8 —— 这是本地 .lrc 最被广泛接受的写法。

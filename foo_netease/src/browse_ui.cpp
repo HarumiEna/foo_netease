@@ -1289,7 +1289,10 @@ private:
 		size_t added = 0;
 		std::string text;
 		try {
-			added = netease_data::insert_tracks(chosen, replace);
+			// 替换时把"这堆曲目来自哪个歌单"一起传下去：这个播放列表就等于那个歌单，
+			// 在播放列表管理器里点中它会自动刷新。单歌单模式才有这个 id，列表浏览模式传 0。
+			added = netease_data::insert_tracks(chosen, replace,
+				replace ? m_singlePlaylist : 0);
 			text = std::string(replace ? "已替换为 " : "已添加 ") +
 				std::to_string(added) + " 首到当前播放列表";
 		} catch (const std::exception & ex) {

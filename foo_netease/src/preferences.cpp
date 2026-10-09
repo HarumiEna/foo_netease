@@ -6,6 +6,7 @@
 #include <helpers/DarkMode.h>
 
 #include "component_log.h"
+#include "lyric_store.h"
 #include "netease_data.h"
 #include "core/api.h"
 #include "login_ui.h"
@@ -66,13 +67,15 @@ private:
 		SetDlgItemText(IDC_NETEASE_HINT, netease::to_wide(
 			"登录后即可浏览歌单 / 每日推荐 / 漫游 / 私人雷达并直接播放；"
 			"面板可停靠在布局里（视图 → 布局 → 添加 → 网易云音乐）。"
+			"封面按条目各取各的：列表里每行显示那首歌自己的封面；"
+			"下面「无封面的条目跟随正在播放」只影响本地文件等没有封面来源的条目。"
 			"日志写在 foobar2000 配置目录的 foo_netease.log。").c_str());
 		SetDlgItemText(IDC_NETEASE_LOGIN_BTN, netease::to_wide("扫码登录").c_str());
 		SetDlgItemText(IDC_NETEASE_BROWSE_BTN, netease::to_wide("浏览歌单").c_str());
 		SetDlgItemText(IDC_NETEASE_LOGOUT_BTN, netease::to_wide("登出").c_str());
 		SetDlgItemText(IDC_NETEASE_CLEAR, netease::to_wide("清除全部数据").c_str());
 		SetDlgItemText(IDC_NETEASE_PANEL_BTN, netease::to_wide("打开面板").c_str());
-		SetDlgItemText(IDC_NETEASE_COVER_NOW, netease::to_wide("封面跟随正在播放").c_str());
+		SetDlgItemText(IDC_NETEASE_COVER_NOW, netease::to_wide("无封面的条目跟随正在播放").c_str());
 		::CheckDlgButton(m_hWnd, IDC_NETEASE_COVER_NOW,
 			netease::Session::instance().cover_follow_now_playing() ? BST_CHECKED : BST_UNCHECKED);
 		::SetDlgItemTextW(m_hWnd, IDC_NETEASE_FOLLOW_CURSOR,
@@ -138,9 +141,12 @@ private:
 	}
 
 	void OnClear(UINT, int, CWindow) {
-		const std::wstring question = netease::to_wide("确定要清除本地保存的登录凭据吗？");
+		const std::wstring question = netease::to_wide(
+			"确定要清除本地保存的登录凭据，以及组件生成的本地歌词文件吗？\n"
+			"（<profile>\\lyrics 里别家的歌词不会被删）");
 		if (::MessageBoxW(m_hWnd, question.c_str(), L"foo_netease", MB_YESNO | MB_ICONQUESTION) == IDYES) {
 			netease::Session::instance().logout();
+			netease_lyric::purge_lrc_files();
 			refresh();
 		}
 	}

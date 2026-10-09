@@ -9,6 +9,7 @@
 #include <memory>
 #include <deque>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <random>
 #include <set>
@@ -17,6 +18,7 @@
 
 #include "component_log.h"
 #include "cover_cache.h"
+#include "win_utf8.h"
 #include "core/meta_cache.h"
 #include "meta_store.h"
 #include "session.h"
@@ -601,23 +603,282 @@ size_t insert_tracks_next(const std::vector<netease::TrackInfo> & tracks) {
 	return handles.get_count();
 }
 
-size_t insert_tracks(const std::vector<netease::TrackInfo> & tracks, bool replace) {
-	// 防御：正常歌单最多几千首。真出现异常大的数量，宁可报错也不要让
-	// 上层无限增长（曾经因为选中项遍历写错，chosen 无限膨胀到 bad_alloc 崩掉宿主）。
-	if (tracks.size() > 20000) throw exception_io_data("曲目数量异常（超过 20000），已中止");
+namespace {
+
+// 一批曲目 → netease:// 句柄。
+// no= 是源歌单内序号（从 1 开始）。写进路径，条目身份就带着它，
+// 本地排序不会改动它，用户可按 %netease_no% 还原歌单原顺序。
+std::string song_path(int64_t id, size_t index, const std::string & level) {
+	return "netease://song/" + std::to_string(id) + "?level=" + level +
+		"&no=" + std::to_string(index + 1);
+}
+
+void make_song_handles(const std::vector<netease::TrackInfo> & tracks,
+	const std::string & level, metadb_handle_list & out) {
+	out.remove_all();
+	for (size_t i = 0; i < tracks.size(); ++i) {
+		const std::string path = song_path(tracks[i].id, i, level);
+		out.add_item(metadb::get()->handle_create(path.c_str(), 0));
+	}
+}
+
+// 关键一步：让 foobar2000 去读元数据。
+// 只插入句柄的话，metadb 可能一直沿用「空」的缓存，播放列表里就只剩一串数字。
+void load_info_background(const metadb_handle_list & handles) {
+	auto io = metadb_io_v2::get();
+	if (io.is_valid()) {
+		io->load_info_async(handles, metadb_io::load_info_force, nullptr,
+			metadb_io_v2::op_flag_silent | metadb_io_v2::op_flag_background, nullptr);
+	}
+}
+
+// 防御：正常歌单最多几千首。真出现异常大的数量，宁可报错也不要让上层无限增长
+//（曾经因为选中项遍历写错，chosen 无限膨胀到 bad_alloc 崩掉宿主）。
+void guard_track_count(size_t count) {
+	if (count > 20000) throw exception_io_data("曲目数量异常（超过 20000），已中止");
+}
+
+// 「添加到新的播放列表」用的名字：重名就加 (2)(3)…，
+// 这样"列表名 → 歌单 id"的对应关系才是唯一的（刷新靠名字找列表）。
+std::string unique_playlist_name(const std::string & wanted) {
+	auto pm = playlist_manager::get();
+	if (!pm.is_valid()) return wanted;
+	if (pm->find_playlist(wanted.c_str()) == pfc::infinite_size) return wanted;
+	for (int n = 2; n < 1000; ++n) {
+		const std::string candidate = wanted + " (" + std::to_string(n) + ")";
+		if (pm->find_playlist(candidate.c_str()) == pfc::infinite_size) return candidate;
+	}
+	return wanted;
+}
+
+} // namespace
+
+// ---- fb2k 播放列表 ←→ 网易云歌单 的对应关系 ----
+//
+// 为什么需要它：把歌单整片写进一个 fb2k 播放列表之后，列表名和歌单之间就没有
+// 任何联系了 —— 歌单在服务端变了（加歌/删歌/改名），本地那份永远是旧的。
+// 记下对应关系，用户在 foobar2000 的播放列表管理器里点中这个列表时，就自动重拉一次。
+namespace {
+
+// 只在主线程碰：playlist_manager 的方法都要求主线程，异步回调用 fb2k::inMainThread
+// 投回来，所以回调里改它同样安全。
+std::map<std::string, int64_t> g_pl_source;      // 播放列表名 → 网易云歌单 id（负数 = 无歌单来源）
+std::map<std::string, int64_t> g_pl_source_stamp; // 上次"内容等于歌单"的时刻（冷却用）
+bool g_pl_source_dirty = false;
+// 刷新用的存活标记：退出时置 false，避免回调在组件卸载后去碰 playlist_manager。
+LivenessPtr g_pl_alive = std::make_shared<Liveness>();
+
+const int64_t kPlSourceCooldownMs = 15 * 1000;   // 同一个列表 15 秒内最多刷一次（防来回点连发请求）
+
+// 每日推荐 / 最近播放在网易云侧没有对应歌单，可点中列表照样该能刷新 ——
+// 映射里给这类来源存**负数哨兵 id**（>0 的一律是真歌单 id），刷新时按哨兵分派。
+const int64_t kPlSourceDaily = -1;
+const int64_t kPlSourceRecent = -2;
+
+// 映射来源的可读描述（写日志用）。
+std::string playlist_source_desc(int64_t id) {
+	if (id == kPlSourceDaily) return "每日推荐";
+	if (id == kPlSourceRecent) return "最近播放";
+	return "歌单 id=" + std::to_string(id);
+}
+
+std::string playlist_map_path() {
+	const std::string dir = netease_log::profile_dir();
+	return dir.empty() ? std::string() : dir + "\\foo_netease_playlists.txt";
+}
+
+} // namespace
+
+void playlist_source_save() {
+	if (!g_pl_source_dirty) return;
+	const std::string path = playlist_map_path();
+	if (path.empty()) return;
+	std::ofstream out(netease::to_wide(path).c_str(), std::ios::trunc);
+	if (!out) return;
+	out << "# foo_netease —— fb2k 播放列表名 <TAB> 网易云歌单 id（负数 = 无歌单来源）\n";
+	for (const auto & kv : g_pl_source) out << kv.first << "\t" << kv.second << "\n";
+	g_pl_source_dirty = false;
+}
+
+void playlist_source_set(const std::string & playlist_name, int64_t playlist_id) {
+	if (playlist_name.empty() || playlist_id == 0) return;   // 0 = 没来源；负数是哨兵来源
+	g_pl_source[playlist_name] = playlist_id;
+	// 这里**故意不设冷却时间戳**：内容比对比快，让"新建列表后自动切过去"也走一遍
+	// 刷新流程（结果会是"已是最新、未改动"），链路一眼能在日志里看出来。
+	g_pl_source_dirty = true;
+	playlist_source_save();
+}
+
+int64_t playlist_source_get(const std::string & playlist_name) {
+	auto it = g_pl_source.find(playlist_name);
+	return it == g_pl_source.end() ? 0 : it->second;
+}
+
+void playlist_source_forget(const std::string & playlist_name) {
+	auto it = g_pl_source.find(playlist_name);
+	if (it == g_pl_source.end()) return;
+	g_pl_source.erase(it);
+	g_pl_source_stamp.erase(playlist_name);
+	g_pl_source_dirty = true;
+	playlist_source_save();
+	netease_log::write("foo_netease: 播放列表「" + playlist_name + "」已删除，对应关系一并清掉");
+}
+
+void playlist_source_load() {
+	const std::string path = playlist_map_path();
+	if (path.empty()) return;
+	std::ifstream in(netease::to_wide(path).c_str());
+	if (!in) return;
+	std::string line;
+	while (std::getline(in, line)) {
+		if (line.empty() || line[0] == '#') continue;
+		const size_t tab = line.find('\t');
+		if (tab == std::string::npos || tab == 0) continue;
+		const int64_t id = std::strtoll(line.c_str() + tab + 1, nullptr, 10);
+		if (id != 0) g_pl_source[line.substr(0, tab)] = id;
+	}
+	netease_log::write("foo_netease: 播放列表对应关系已载入 —— " +
+		std::to_string(g_pl_source.size()) + " 个（点中这些列表会自动刷新）");
+}
+
+void playlist_source_shutdown() {
+	if (g_pl_alive) g_pl_alive->alive = false;
+	playlist_source_save();
+}
+
+// 把重新拉到的内容写回映射的那个列表：内容一模一样就什么都不动（免得打断选中项 /
+// 滚动位置），不一样才整片替换，并留一个撤销点。what 只用于日志。
+void rewrite_mapped_playlist(const std::string & key, FeedResult r, const std::string & what) {
+	if (!r.ok) {
+		netease_log::write("foo_netease: 刷新「" + key + "」失败：" + r.error);
+		return;
+	}
+	auto pm = playlist_manager::get();
+	if (!pm.is_valid()) return;
+	const t_size index = pm->find_playlist(key.c_str());
+	if (index == pfc::infinite_size) {
+		netease_log::write("foo_netease: 刷新「" + key + "」时列表已不在，跳过");
+		return;
+	}
+	const std::string level = netease::Session::instance().quality();
+
+	std::vector<std::string> want;
+	want.reserve(r.tracks.size());
+	for (size_t i = 0; i < r.tracks.size(); ++i) {
+		want.push_back(song_path(r.tracks[i].id, i, level));
+	}
+	std::vector<std::string> have;
+	pm->playlist_enum_items(index, [&have](size_t, const metadb_handle_ptr & h, bool) -> bool {
+		const char * path = h.is_valid() ? h->get_path() : nullptr;
+		have.push_back(path ? std::string(path) : std::string());
+		return true;
+	}, bit_array_true());
+
+	if (want == have) {
+		netease_log::write("foo_netease: 「" + key + "」已是最新（" +
+			std::to_string(want.size()) + " 首），未改动");
+		return;
+	}
 
 	metadb_handle_list handles;
-	const std::string level = netease::Session::instance().quality();
-	for (size_t i = 0; i < tracks.size(); ++i) {
-		// no= 是源歌单内序号（从 1 开始）。写进路径，条目身份就带着它，
-		// 本地排序不会改动它，用户可按 %netease_no% 还原歌单原顺序。
-		const std::string path = "netease://song/" + std::to_string(tracks[i].id) +
-			"?level=" + level + "&no=" + std::to_string(i + 1);
-		handles.add_item(metadb::get()->handle_create(path.c_str(), 0));
+	make_song_handles(r.tracks, level, handles);
+	if (handles.get_count() == 0) return;
+	// 留一个撤销点：用户 Ctrl+Z 能退回刷新前的内容。
+	pm->playlist_undo_backup(index);
+	if (!pm->playlist_remove_items(index, bit_array_true())) {
+		netease_log::write("foo_netease: 「" + key + "」被锁定，刷新未写入");
+		return;
 	}
+	pm->playlist_insert_items(index, 0, handles, bit_array_false());
+	load_info_background(handles);
+	netease_log::write("foo_netease: 已刷新「" + key + "」—— " +
+		std::to_string(have.size()) + " → " + std::to_string(handles.get_count()) +
+		" 首（" + what + "）");
+}
+
+void playlist_source_refresh_if_mapped(t_size playlist_index) {
+	auto pm = playlist_manager::get();
+	if (!pm.is_valid()) return;
+	if (playlist_index >= pm->get_playlist_count()) return;
+	pfc::string8 buf;
+	if (!pm->playlist_get_name(playlist_index, buf)) return;
+	const std::string key(buf.get_ptr());
+	auto found = g_pl_source.find(key);
+	if (found == g_pl_source.end() || found->second == 0) return;   // 负数哨兵来源也要刷
+	if (!netease::Session::instance().logged_in()) return;
+
+	const int64_t now = now_ms();
+	auto stamp = g_pl_source_stamp.find(key);
+	if (stamp != g_pl_source_stamp.end() && now - stamp->second < kPlSourceCooldownMs) {
+		netease_log::write("foo_netease: 点中「" + key + "」—— 刚刷过，还有 " +
+			std::to_string((kPlSourceCooldownMs - (now - stamp->second)) / 1000) +
+			" 秒冷却，跳过");
+		return;
+	}
+	g_pl_source_stamp[key] = now;
+	const int64_t id = found->second;
+
+	netease_log::write("foo_netease: 点中播放列表「" + key + "」—— 自动刷新（" +
+		playlist_source_desc(id) + "）");
+	// 真歌单走歌单详情；每日推荐 / 最近播放按哨兵分派到各自的加载器，写回逻辑共用。
+	if (id == kPlSourceDaily) {
+		load_daily_async(g_pl_alive, [key](FeedResult r) {
+			// 注意别捕获 id：这里直接按哨兵常量出描述。
+			rewrite_mapped_playlist(key, std::move(r), playlist_source_desc(kPlSourceDaily));
+		});
+	} else if (id == kPlSourceRecent) {
+		load_recent_async(g_pl_alive, [key](FeedResult r) {
+			rewrite_mapped_playlist(key, std::move(r), playlist_source_desc(kPlSourceRecent));
+		});
+	} else {
+		load_playlist_tracks_async(g_pl_alive, id, [key, id](FeedResult r) {
+			rewrite_mapped_playlist(key, std::move(r), playlist_source_desc(id));
+		});
+	}
+}
+
+size_t insert_tracks_into_new_playlist(const std::vector<netease::TrackInfo> & tracks,
+	const std::string & name, int64_t playlist_id) {
+	guard_track_count(tracks.size());
+	if (tracks.empty()) return 0;
+
+	auto pm = playlist_manager::get();
+	if (!pm.is_valid()) return 0;
+
+	const std::string playlist_name = unique_playlist_name(
+		name.empty() ? std::string("网易云歌单") : name);
+	const t_size index = pm->create_playlist(playlist_name.c_str(),
+		pfc::infinite_size, pfc::infinite_size);
+	if (index == pfc::infinite_size) return 0;
+
+	metadb_handle_list handles;
+	make_song_handles(tracks, netease::Session::instance().quality(), handles);
+	if (handles.get_count() == 0) return 0;
+	pm->playlist_insert_items(index, 0, handles, bit_array_false());
+	// 顺序要紧：**先**记对应关系再切过去。切过去会立刻触发播放列表回调
+	//（就是"点中列表 → 自动刷新"那条），反过来的话回调那一刻还查不到对应哪个歌单。
+	if (playlist_id != 0) playlist_source_set(playlist_name, playlist_id);   // 含负数哨兵来源
+	// 跟 foobar2000 自带"发送到新建播放列表"一致：切过去，让用户直接看到结果。
+	pm->set_active_playlist(index);
+	netease_log::write("foo_netease: 新建播放列表「" + playlist_name + "」写入 " +
+		std::to_string(handles.get_count()) + " 项" +
+		(playlist_id != 0
+			? ("（对应" + playlist_source_desc(playlist_id) + "；点中该列表会自动刷新）")
+			: std::string()));
+	load_info_background(handles);
+	return handles.get_count();
+}
+
+size_t insert_tracks(const std::vector<netease::TrackInfo> & tracks, bool replace,
+	int64_t source_playlist_id) {
+	guard_track_count(tracks.size());
+
+	metadb_handle_list handles;
+	make_song_handles(tracks, netease::Session::instance().quality(), handles);
 	if (handles.get_count() == 0) return 0;
 
 	auto pm = playlist_manager::get();
+	if (!pm.is_valid()) return 0;
 	// 别把曲目塞进"网易云漫游"—— 那是漫游电台专用的列表，
 	// 而且电台会把它设为当前列表，于是"发送到当前播放列表"会误伤它。
 	// 这种情况下改用第一个（默认）播放列表。
@@ -634,13 +895,18 @@ size_t insert_tracks(const std::vector<netease::TrackInfo> & tracks, bool replac
 	netease_log::write("foo_netease: 已写入播放列表 " + std::to_string(handles.get_count()) +
 		" 项（" + std::string(replace ? "替换" : "追加") + "）");
 
-	// 关键一步：让 foobar2000 去读元数据。
-	// 只插入句柄的话，metadb 可能一直沿用「空」的缓存，播放列表里就只剩一串数字。
-	auto io = metadb_io_v2::get();
-	if (io.is_valid()) {
-		io->load_info_async(handles, metadb_io::load_info_force, nullptr,
-			metadb_io_v2::op_flag_silent | metadb_io_v2::op_flag_background, nullptr);
+	// 整片替换 = 这个列表的内容就是那个来源（歌单 / 每日推荐 / 最近播放）：
+	// 记下对应关系，点中它就能自动刷新。
+	// 追加不记 —— 列表里混了用户自己加的东西，刷新会把它们冲掉。
+	if (replace && source_playlist_id != 0) {
+		pfc::string8 name;
+		const t_size active = pm->get_active_playlist();
+		if (active != pfc::infinite_size && pm->playlist_get_name(active, name)) {
+			playlist_source_set(std::string(name.get_ptr()), source_playlist_id);
+		}
 	}
+
+	load_info_background(handles);
 	return handles.get_count();
 }
 
@@ -683,6 +949,8 @@ FeedResult load_playlist_tracks(netease::NeteaseApi & api, int64_t playlist_id) 
 		std::to_string(stats.cached) + "，请求 " + std::to_string(stats.requested) +
 		"，返回 " + std::to_string(stats.fetched));
 
+	r.name = name.empty() ? ("歌单 " + std::to_string(playlist_id)) : name;
+	r.source_playlist_id = playlist_id;
 	r.title = (name.empty() ? ("歌单 " + std::to_string(playlist_id)) : name) +
 		"：" + std::to_string(ids.size()) + " 首";
 	if (track_count >= 0 && static_cast<size_t>(track_count) != ids.size()) {
@@ -817,6 +1085,8 @@ void load_daily_async(LivenessPtr alive, std::function<void(FeedResult)> done) {
 		if (!call.ok) { r.error = "日推失败：" + call.error; return r; }
 		netease::MetaCache::instance().put_all(r.tracks);
 		netease_app::save_meta_cache();
+		r.name = "每日推荐";
+		r.source_playlist_id = kPlSourceDaily;
 		r.title = "每日推荐：" + std::to_string(r.tracks.size()) + " 首";
 		r.ok = true;
 		return r;
@@ -832,6 +1102,7 @@ void load_fm_async(LivenessPtr alive, std::function<void(FeedResult)> done) {
 		if (!call.ok) { r.error = "漫游失败：" + call.error; return r; }
 		netease::MetaCache::instance().put_all(r.tracks);
 		netease_app::save_meta_cache();
+		r.name = "漫游（私人 FM）";
 		r.title = "漫游（私人 FM）：" + std::to_string(r.tracks.size()) +
 			" 首（播完自动换下一批）";
 		r.ok = true;
@@ -984,6 +1255,8 @@ void load_recent_async(LivenessPtr alive, std::function<void(FeedResult)> done) 
 			}
 			r.tracks = std::move(merged);
 		}
+		r.name = "最近播放";
+		r.source_playlist_id = kPlSourceRecent;
 		r.title = "最近播放：" + std::to_string(r.tracks.size()) + " 首" +
 			(local_added ? "（其中本机播放 " + std::to_string(local_added) + " 首）" : "");
 		r.ok = true;
@@ -1007,7 +1280,8 @@ void load_cn_roam_async(LivenessPtr alive, std::function<void(FeedResult)> done)
 			if (call.ok && id != 0) r = load_playlist_tracks(api, id);
 		}
 		if (r.ok) {
-			r.title = "华语私人雷达：" + std::to_string(r.tracks.size()) + " 首";
+			r.name = "华语私人雷达";
+		r.title = "华语私人雷达：" + std::to_string(r.tracks.size()) + " 首";
 			netease_log::write("foo_netease: 华语私人雷达 —— " + std::to_string(r.tracks.size()) + " 首");
 		} else if (r.error.empty()) {
 			r.error = "华语私人雷达没取到曲目";
@@ -1041,7 +1315,11 @@ void load_radar_async(LivenessPtr alive, std::function<void(FeedResult)> done) {
 			return r;
 		}
 		FeedResult r = load_playlist_tracks(api, id);
-		if (r.ok) r.title = name + "：" + std::to_string(r.tracks.size()) + " 首";
+		if (r.ok) {
+			r.title = name + "：" + std::to_string(r.tracks.size()) + " 首";
+			r.name = name;
+			r.source_playlist_id = id;
+		}
 		return r;
 	});
 }

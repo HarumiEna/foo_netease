@@ -166,25 +166,26 @@ public:
 		// 兜底：这个函数跑在封面加载线程，抛任何非 foobar2000 的异常都可能直接把进程带走，
 		// 所以统一收敛成"没有封面"。
 		try {
-		// 取哪首歌的封面有两个来源：
-		//  1) 设置里打开"封面跟随正在播放"时，用正在播放的那首
-		//     —— 否则封面会跟着列表里鼠标选中的条目跑；
-		//  2) 否则用调用方给的曲目（foobar2000 自己的规则）。
+		// 取哪首歌的封面：**以调用方给的条目为准**。
+		// 播放列表逐行画封面时，每一行都会带着自己那条来要图，必须按条目出图 ——
+		// 以前这里只要开着"封面跟随正在播放"就无条件用正在播放那首，
+		// 结果整列封面全被顶成同一张（用户实测：列表显示封面时所有歌都是同一个封面）。
+		// 只有请求方**没给**网易云曲目（本地文件、空请求）时才拿正在播放那首兜底，
+		// "跟随正在播放"在这个意义上才真正有用。
 		// 注意：这里**不能**调用 playback_control::get_now_playing()。
 		// open() 跑在"专辑封面加载线程"上，那样会让进程崩掉
 		//（实测崩溃：专辑封面加载线程=>album_art_manager_v2::open，函数栈检查失败）。
 		// 正在播放的路径由 play_callback 在主线程写好，这里只读缓存。
 		const bool follow_now = netease::Session::instance().cover_follow_now_playing();
-		int64_t id = 0;
-		if (follow_now) {
+		int64_t asked_id = 0;
+		for (t_size i = 0; i < items.get_count(); ++i) {
+			asked_id = parse_song_id(items[i]->get_path());
+			if (asked_id > 0) break;
+		}
+		int64_t id = asked_id;
+		if (id <= 0 && follow_now) {
 			const std::string now = netease_data::now_playing_path();
 			id = parse_song_id(now.c_str());
-		}
-		if (id <= 0) {
-			for (t_size i = 0; i < items.get_count(); ++i) {
-				id = parse_song_id(items[i]->get_path());
-				if (id > 0) break;
-			}
 		}
 		if (id <= 0) throw exception_album_art_not_found();
 
@@ -207,10 +208,13 @@ public:
 					(first ? first : "(null)");
 			}
 			netease_log::write("foo_netease: 封面请求 —— 请求方给的是[" + asked + "]，跟随正在播放=" +
-				(follow_now ? "是" : "否") + "，最终用 id=" + std::to_string(id) + " -> " + url +
-				(follow_now ? "（实例动态，query 时重取）" : ""));
+				(follow_now ? "是" : "否") + "，要 id=" + std::to_string(asked_id) + "，最终用 id=" +
+				std::to_string(id) + " -> " + url +
+				(id != asked_id ? "（请求里没有网易云曲目，兜底用正在播放那首）" : ""));
 		}
-		return fb2k::service_new<netease_cover_instance>(id, url, follow_now);
+		// 只有走"没条目 → 正在播放"兜底时，实例才跟着正在播放走（切歌重新取图）；
+		// 按条目出图的实例必须钉死在它那一条上，否则列表每行都会被顶成同一张。
+		return fb2k::service_new<netease_cover_instance>(id, url, follow_now && asked_id <= 0);
 		} catch (const exception_album_art_not_found &) {
 			throw;   // foobar2000 自己的"没有封面"，照常传递
 		} catch (const std::exception & ex) {

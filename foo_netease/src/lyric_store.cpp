@@ -3,8 +3,12 @@
 
 #include <windows.h>
 
+#include <cstdlib>
+#include <ctime>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <set>
 #include <unordered_map>
@@ -12,6 +16,7 @@
 
 #include "component_log.h"
 #include "core/api.h"
+#include "core/meta_cache.h"
 #include "session.h"
 
 namespace netease_lyric {
@@ -24,7 +29,14 @@ std::unordered_map<int64_t, std::string> g_cache_yrc;        // id -> 原始逐�
 std::unordered_map<int64_t, std::string> g_cache_enhanced;   // id -> 增强型 LRC（A2）
 std::set<int64_t> g_inflight;                       // 正在后台取的 id
 std::set<int64_t> g_lrc_written;                    // 已经落过盘的 id
+// 我们写过的 .lrc 文件名（不含后缀）→ 最后写入时间（unix 秒）。
+// 清理时**只动这里记着的文件**：<profile>\lyrics 是 ESLyric 的默认歌词目录，
+// 里面还可能有它自己下载的歌词，不能见到 .lrc 就删。
+std::map<std::string, int64_t> g_lrc_files;
+bool g_lrc_manifest_dirty = false;
 bool g_lrc_dir_logged = false;
+// 多久没再写过就清掉。"不需要时再清理"的默认策略。
+const int64_t kLrcKeepSeconds = 7 * 24 * 60 * 60;
 
 std::wstring to_wide(const std::string & utf8) {
 	if (utf8.empty()) return std::wstring();
@@ -358,12 +370,22 @@ void ensure_async(int64_t id, const std::string & path) {
 			if (ok) g_cache[id] = text;
 		}
 		if (!ok) return;
+		// 文件就在这儿写：不依赖宿主重读元数据，播放时它已经躺在 <profile>\lyrics 里
+		//（ESLyric 的「本地歌词」来源默认就找这个目录，无需任何配置）。
+		{
+			netease::TrackInfo t;
+			if (netease::MetaCache::instance().get(id, t)) {
+				std::string enhanced;
+				const std::string body = get_cached_enhanced(id, enhanced) ? enhanced : text;
+				ensure_lrc_file(id, t.artists, t.title, body);
+			}
+		}
 		netease_log::write("foo_netease: 歌词已获取 id=" + std::to_string(id) +
 			"（" + std::to_string(text.size()) + " 字节）");
 		if (keep_path.empty()) return;
-		// 关键：dispatch_refresh() 只让界面重画，**不会重新读 file_info**，
-		// 所以新出现的 %LYRICS% 标签永远进不了 metadb（歌词显示器也就看不到）。
-		// 必须用 load_info_force 强制重读一次 input 的 get_info()。
+		// 顺手让宿主重读一次元数据：input 的 get_info() 里会兜底补写一次 .lrc
+		//（万一上面 MetaCache 还没缓存到这首歌的标题/歌手，就凑不出文件名）。
+		// dispatch_refresh() 只让界面重画、**不会重新读 file_info**，所以要 load_info_force。
 		fb2k::inMainThread([keep_path] {
 			metadb_handle_list handles;
 			handles.add_item(metadb::get()->handle_create(keep_path.c_str(), 0));
@@ -386,6 +408,95 @@ std::string lrc_dir() {
 	return profile + "\\lyrics";
 }
 
+namespace {
+
+std::string lrc_manifest_path() {
+	const std::string profile = netease_log::profile_dir();
+	if (profile.empty()) return std::string();
+	return profile + "\\foo_netease_lrc_files.txt";
+}
+
+// 把"我们写过哪些 .lrc"落盘。清理只认这份清单。
+void save_lrc_manifest() {
+	std::map<std::string, int64_t> snapshot;
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		if (!g_lrc_manifest_dirty) return;
+		snapshot = g_lrc_files;
+		g_lrc_manifest_dirty = false;
+	}
+	const std::string path = lrc_manifest_path();
+	if (path.empty()) return;
+	std::ofstream out(to_wide(path).c_str(), std::ios::trunc);
+	if (!out) return;
+	out << "# foo_netease —— 本组件写在 <profile>\\lyrics 里的 .lrc（文件名 <TAB> unix 秒）。"
+		"\n# 清理时只删清单里列出的这些，不动目录里别家的歌词。\n";
+	for (const auto & kv : snapshot) out << kv.first << "\t" << kv.second << "\n";
+}
+
+} // namespace
+
+void cleanup_lrc_files() {
+	const std::string path = lrc_manifest_path();
+	const std::string dir = lrc_dir();
+	if (path.empty() || dir.empty()) return;
+
+	std::map<std::string, int64_t> files;
+	{
+		std::ifstream in(to_wide(path).c_str());
+		std::string line;
+		while (std::getline(in, line)) {
+			if (line.empty() || line[0] == '#') continue;
+			const size_t tab = line.find('\t');
+			if (tab == std::string::npos || tab == 0) continue;
+			files[line.substr(0, tab)] = std::strtoll(line.c_str() + tab + 1, nullptr, 10);
+		}
+	}
+	const int64_t now = static_cast<int64_t>(::time(nullptr));
+	std::map<std::string, int64_t> keep;
+	std::error_code ec;
+	size_t removed = 0;
+	for (const auto & kv : files) {
+		if (kv.second > 0 && now - kv.second < kLrcKeepSeconds) {
+			keep.insert(kv);
+			continue;
+		}
+		std::filesystem::remove(std::filesystem::path(to_wide(dir + "\\" + kv.first + ".lrc")), ec);
+		if (!ec) ++removed;
+	}
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		g_lrc_files = keep;
+		g_lrc_manifest_dirty = true;
+	}
+	save_lrc_manifest();
+	if (removed > 0) {
+		netease_log::write("foo_netease: 本地歌词已清理 " + std::to_string(removed) +
+			" 份（超过 " + std::to_string(kLrcKeepSeconds / 86400) + " 天没再写过的）");
+	}
+}
+
+void purge_lrc_files() {
+	const std::string dir = lrc_dir();
+	std::map<std::string, int64_t> files;
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		files.swap(g_lrc_files);
+		g_lrc_written.clear();   // 放行：以后播放还会重新写
+		g_lrc_manifest_dirty = true;
+	}
+	size_t removed = 0;
+	std::error_code ec;
+	if (!dir.empty()) {
+		for (const auto & kv : files) {
+			std::filesystem::remove(std::filesystem::path(to_wide(dir + "\\" + kv.first + ".lrc")), ec);
+			if (!ec) ++removed;
+		}
+	}
+	save_lrc_manifest();
+	netease_log::write("foo_netease: 已删除组件生成的本地歌词 " + std::to_string(removed) + " 份");
+}
+
 bool ensure_lrc_file(int64_t id, const std::string & artist, const std::string & title,
 	const std::string & text) {
 	// 有逐字就写增强型 LRC —— ESLyric 这类歌词显示器看到 <mm:ss.xx> 就会逐字着色。
@@ -402,28 +513,58 @@ bool ensure_lrc_file(int64_t id, const std::string & artist, const std::string &
 	const std::string dir = lrc_dir();
 	if (dir.empty()) return false;
 
-	// 文件名规则来自 ESLyric 自身：
-	//   模板 = $if2(%title% - ,%filename% - )$if2(%artist%,)
-	// 即「标题 - 歌手」。歌手可能有多位（我们用 / 连接），而 / 不能出现在文件名里，
-	// 所以写两个变体：全歌手、以及只取第一位歌手。
+	// 文件名规则：ESLyric 的「本地歌词」是按它自己的模板去这个目录里找同名文件的，
+	// 而模板方向随版本/设置而变 —— 这台机器的配置里是 [%artist% - ]%title%，
+	// 也就是「歌手 - 标题」；另一处默认又是「标题 - 歌手」。**两个方向都写一份**，
+	// 免得因为方向反了死活匹配不上（之前就是这个原因：文件写了但歌词显示器读不到）。
+	// 歌手可能有多位（缓存里用 / 连接），所以每个方向还要覆盖几种写法：
+	//   · 全歌手（/ 换成 _）
+	//   · 只取第一位歌手
+	//   · foobar2000 里 %artist% 的常规呈现（多值用 ", " 连接）
 	const std::string t = title.empty() ? std::to_string(id) : sanitize(title);
-	std::vector<std::string> stems;
+	std::vector<std::string> artists;
 	{
 		std::string first = artist;
 		const size_t slash = artist.find('/');
 		if (slash != std::string::npos) first = artist.substr(0, slash);
 		const std::string all_s = sanitize(artist);
 		const std::string first_s = sanitize(first);
-		if (!all_s.empty()) stems.push_back(t + " - " + all_s);
-		if (!first_s.empty() && first_s != all_s) stems.push_back(t + " - " + first_s);
-		if (stems.empty()) stems.push_back(t);   // 没歌手信息时至少给一个能匹配的
+		if (!all_s.empty()) artists.push_back(all_s);
+		if (!first_s.empty() && first_s != all_s) artists.push_back(first_s);
+		if (slash != std::string::npos) {
+			std::string comma;
+			size_t pos = 0;
+			while (pos <= artist.size()) {
+				const size_t next = artist.find('/', pos);
+				const std::string part = artist.substr(pos,
+					next == std::string::npos ? std::string::npos : next - pos);
+				if (!comma.empty()) comma += ", ";
+				comma += part;
+				if (next == std::string::npos) break;
+				pos = next + 1;
+			}
+			const std::string comma_s = sanitize(comma);
+			if (!comma_s.empty() && comma_s != all_s && comma_s != first_s) {
+				artists.push_back(comma_s);
+			}
+		}
 	}
+	std::vector<std::string> stems;
+	for (const std::string & a : artists) {
+		const std::string s1 = t + " - " + a;   // 标题 - 歌手
+		const std::string s2 = a + " - " + t;   // 歌手 - 标题
+		if (std::find(stems.begin(), stems.end(), s1) == stems.end()) stems.push_back(s1);
+		if (std::find(stems.begin(), stems.end(), s2) == stems.end()) stems.push_back(s2);
+	}
+	// 没歌手信息时至少给一个能匹配的（模板里歌手那一段本来就可省）。
+	if (stems.empty()) stems.push_back(t);
 
 	try {
 		std::filesystem::create_directories(std::filesystem::path(to_wide(dir)));
 		// UTF-8 BOM：对本地 .lrc 来说兼容性最好。
 		const unsigned char bom[3] = { 0xEF, 0xBB, 0xBF };
 		bool wrote = false;
+		const int64_t now = static_cast<int64_t>(::time(nullptr));
 		for (const std::string & stem : stems) {
 			std::ofstream out(to_wide(dir + "\\" + stem + ".lrc").c_str(),
 				std::ios::binary | std::ios::trunc);
@@ -431,8 +572,15 @@ bool ensure_lrc_file(int64_t id, const std::string & artist, const std::string &
 			out.write(reinterpret_cast<const char *>(bom), 3);
 			out.write(body.data(), static_cast<std::streamsize>(body.size()));
 			wrote = true;
+			// 记进清单：以后「不需要时再清理」只删这里记着的文件。
+			{
+				std::lock_guard<std::mutex> lock(g_mutex);
+				g_lrc_files[stem] = now;
+				g_lrc_manifest_dirty = true;
+			}
 		}
 		if (!wrote) return false;
+		save_lrc_manifest();
 
 		std::lock_guard<std::mutex> lock(g_mutex);
 		g_lrc_written.insert(id);

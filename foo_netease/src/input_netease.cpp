@@ -418,29 +418,33 @@ public:
 		const std::string level = m_level.empty() ? netease::Session::instance().quality() : m_level;
 		p_info.meta_set("netease_level", level.c_str());
 
-		// 歌词：以**标准标签名**提供，这样 foobar2000 的歌词显示器
-		//（例如 ESLyric 的「内嵌歌词」来源）能直接读到。
-		// 播放时已后台预取；取到后会 dispatch_refresh，于是这里会被再调一次。
+		// 歌词两条路都铺：
+		//   1) 写成 <profile>\lyrics 下的 .lrc —— 「本地歌词文件夹」类显示端（ESLyric）用；
+		//   2) 照旧作为**运行时标签**提供 —— 只存在于内存、绝不写进任何文件；webview2 那类
+		//      按标签读歌词的界面，对 netease:// 这种伪流只会走这条路（它们的本地文件查找
+		//      要求曲目是真实文件，伪流定位不到目录）。
+		// 「不需要时清理」不冲突：标签随会话消失，.lrc 归「清除全部数据」/ 七天自动清理管。
 		{
 			std::string lyric, enhanced;
 			const bool has_plain = netease_lyric::get_cached(m_id, lyric) && !lyric.empty();
 			const bool has_enh = netease_lyric::get_cached_enhanced(m_id, enhanced) && !enhanced.empty();
 			if (has_plain || has_enh) {
-				// ESLyric 的「内嵌歌词」来源读的就是 %LYRICS%（从它的 DLL 字符串确认）。
-				// **必须给它增强型**：它选「显示增强型歌词」时会解析词级 <mm:ss.xxx> 标签，
-				// 给它普通歌词的话这个开关就形同虚设（之前的 bug）。
-				// LYRIC / UNSYNCEDLYRICS 给普通版，免得别家只认普通 LRC 的组件显示出一堆尖括号。
-				const std::string & tag_lyric = has_enh ? enhanced : lyric;
-				p_info.meta_set("LYRICS", tag_lyric.c_str());
-				p_info.meta_set("LYRIC", lyric.c_str());
-				p_info.meta_set("UNSYNCEDLYRICS", lyric.c_str());
-				// 同时落一份 .lrc，供歌词显示器的「本地歌词文件夹」使用
-				// （比依赖标签更可靠：ESLyric 的本地来源就是这么找文件的）。
-				netease_lyric::ensure_lrc_file(m_id, track.artists, track.title, tag_lyric);
+				// 有逐字版权就给增强型：ESLyric 看到词级 <mm:ss.xxx> 标签会逐字着色。
+				const std::string & body = has_enh ? enhanced : lyric;
+				netease_lyric::ensure_lrc_file(m_id, track.artists, track.title, body);
+				// 标签：带时间戳的归 SYNCEDLYRICS（同步），纯文本归 UNSYNCEDLYRICS；
+				// LYRICS 两个都填 —— 各显示端读的字段名不一样，都伺候到。
+				p_info.meta_set("LYRICS", body.c_str());
+				if (body.find('[') != std::string::npos) {
+					p_info.meta_set("SYNCEDLYRICS", body.c_str());
+				} else {
+					p_info.meta_set("UNSYNCEDLYRICS", body.c_str());
+				}
 				static std::atomic<int> lyric_logged{ 0 };
 				if (lyric_logged.fetch_add(1) < 3) {
-					netease_log::write("foo_netease [input] 已把歌词作为 LYRIC 标签提供给 foobar2000（id=" +
-						std::to_string(m_id) + "，" + std::to_string(tag_lyric.size()) + " 字节" + (has_enh ? "（增强型）" : "") + "）");
+					netease_log::write("foo_netease [input] 歌词已备好（id=" +
+						std::to_string(m_id) + "，" + std::to_string(body.size()) + " 字节" +
+						(has_enh ? "（增强型）" : "") + "）：.lrc 已写、标签已给");
 				}
 			}
 		}

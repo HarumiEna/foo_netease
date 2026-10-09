@@ -878,18 +878,35 @@ private:
 		}
 		netease_log::write("foo_netease [panel] 加载成功：" + r.title);
 		try {
+			// 这次加载要写到哪里：新列表 / 追加 / 替换。取一次就清掉，避免影响下一次。
+			const bool to_new_playlist = m_new_playlist;
+			const bool append = m_append_mode;
+			m_new_playlist = false;
 			// 只有真正的"漫游（私人 FM）"走电台那条路（它为了无限续播有 24 首硬上限）；
 			// 「华语私人雷达」是**普通歌单**（35 首），必须走下面的常规写入，
 			// 否则会被电台的裁剪逻辑删到只剩 24 首 —— 之前"歌单不全"就是这个原因。
 			if (m_current_kind == Entry::Fm && fm_radio_on()) {
 				// 双击漫游（m_append_mode=false）= 新会话，整片替换；
 				// 右键「添加到当前播放列表」= 只追加。
-				netease_data::sync_fm_playlist(r.tracks, !m_append_mode);
+				netease_data::sync_fm_playlist(r.tracks, !append);
 				set_status(r.title + " —— 已发到「网易云漫游」播放列表");
 				return;
 			}
-			const size_t added = netease_data::insert_tracks(r.tracks, !m_append_mode);
-			set_status(r.title + " —— 已" + (m_append_mode ? "添加到" : "替换") +
+			if (to_new_playlist) {
+				// 「添加到新的播放列表」：用歌单名新建一个 fb2k 播放列表、整片写进去，
+				// 并记下对应关系 —— 之后在播放列表管理器里点中它就会自动刷新。
+				const std::string name = r.name.empty() ? std::string("网易云歌单") : r.name;
+				const size_t added = netease_data::insert_tracks_into_new_playlist(
+					r.tracks, name, r.source_playlist_id);
+				set_status("「" + name + "」—— 已写入新的播放列表（" +
+					std::to_string(added) + " 首）");
+				return;
+			}
+			// 整片替换时把来源歌单 id 一起传下去：这个列表就等于那个歌单，点中它会自动刷新。
+			// 追加不传 —— 列表里混了用户自己加的东西，刷新会把它们冲掉。
+			const size_t added = netease_data::insert_tracks(r.tracks, !append,
+				append ? 0 : r.source_playlist_id);
+			set_status(r.title + " —— 已" + (append ? "添加到" : "替换") +
 				"当前播放列表（" + std::to_string(added) + " 首）");
 		} catch (const std::exception & ex) {
 			netease_log::write(std::string("foo_netease [panel] 发送失败：") + ex.what());
@@ -956,6 +973,7 @@ private:
 		m_current_kind = e.kind;
 		m_current_id = e.id;
 		m_append_mode = false;   // 双击一律替换（右键菜单才会设成追加）
+		m_new_playlist = false;
 		if (!netease::Session::instance().logged_in()) {
 			set_status("尚未登录。请到 参数设置 → 工具 → 网易云音乐 里扫码登录。");
 			return;
@@ -983,8 +1001,11 @@ private:
 
 		const Entry entry = m_entries[index];
 		const bool is_playlist = (entry.kind == Entry::Playlist && entry.id > 0);
+		// 漫游有自己专属的「网易云漫游」列表（电台会一直往里续批），不给它新建列表。
+		const bool is_fm = (entry.kind == Entry::Fm);
 		HMENU menu = ::CreatePopupMenu();
 		::AppendMenuW(menu, MF_STRING, 1, w("添加到当前播放列表").c_str());
+		::AppendMenuW(menu, MF_STRING | (is_fm ? MF_GRAYED : 0), 4, w("添加到新的播放列表").c_str());
 		::AppendMenuW(menu, MF_STRING, 2, w("用这个来源替换当前播放列表").c_str());
 		// 只有歌单才能在新窗口里显示（其它来源没有歌单 id）。
 		::AppendMenuW(menu, MF_STRING | (is_playlist ? 0 : MF_GRAYED), 3, w("显示歌单（新窗口）").c_str());
@@ -998,14 +1019,15 @@ private:
 			netease_ui::show_browse_window_for(entry.id, m_hWnd);
 			return;
 		}
-		if (cmd != 1 && cmd != 2) return;
+		if (cmd != 1 && cmd != 2 && cmd != 4) return;
 
 		const Entry e = m_entries[index];
 		m_append_mode = (cmd == 1);
+		m_new_playlist = (cmd == 4);
 		m_current_kind = e.kind;
 		m_current_id = e.id;
 		netease_log::write(std::string("foo_netease [panel] 右键：") +
-			(cmd == 1 ? "添加" : "替换") + "当前播放列表 -> " + e.name);
+			(cmd == 1 ? "添加" : (cmd == 4 ? "添加到新列表" : "替换")) + " -> " + e.name);
 		if (!netease::Session::instance().logged_in()) { set_status("尚未登录。"); return; }
 		load_entry(e);
 	}
@@ -1116,6 +1138,7 @@ private:
 		if (m_search_keyword.empty()) { set_status("请先搜索一次。"); return; }
 		if (!netease::Session::instance().logged_in()) { set_status("搜索需要登录。"); return; }
 		m_append_mode = append;
+		m_new_playlist = false;
 		m_current_kind = Entry::Search;
 		m_current_id = 0;
 		set_status(append ? "正在加载更多搜索结果…" : "正在搜索…");
@@ -1197,6 +1220,7 @@ private:
 	Entry::Kind m_current_kind = Entry::Daily;
 	int64_t m_current_id = 0;
 	bool m_append_mode = false;   // 右键"添加"为 true；左键/默认是替换
+	bool m_new_playlist = false;  // 右键"添加到新的播放列表"为 true（只对这一次加载生效）
 	int m_login_retry = 0;
 	std::string m_search_keyword;   // 上次搜索词（供歌曲「更多」翻页）
 	int m_search_offset = 0;        // 已载入多少首搜索结果

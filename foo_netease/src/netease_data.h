@@ -23,7 +23,30 @@ struct Liveness { std::atomic<bool> alive{ true }; };
 using LivenessPtr = std::shared_ptr<Liveness>;
 
 // 把一组曲目写成 netease:// 句柄放进当前播放列表；replace=true 时先清空。
-size_t insert_tracks(const std::vector<netease::TrackInfo> & tracks, bool replace);
+// replace 且 source_playlist_id > 0 时，记下"当前播放列表名 → 这个歌单 id"的对应关系
+//（之后在 foobar2000 的播放列表管理器里点中它，就会自动重拉一次并替换内容）。
+size_t insert_tracks(const std::vector<netease::TrackInfo> & tracks, bool replace,
+	int64_t source_playlist_id = 0);
+
+// 「添加到新的播放列表」：新建一个以 name 命名的 fb2k 播放列表，整片写入这批曲目，
+// 并把它设为当前列表（跟 foobar2000 自带"发送到新建播放列表"的行为一致）。
+// playlist_id > 0 时顺带记下对应关系。
+size_t insert_tracks_into_new_playlist(const std::vector<netease::TrackInfo> & tracks,
+	const std::string & name, int64_t playlist_id);
+
+// ---- fb2k 播放列表 ←→ 网易云歌单 的对应关系 ----
+//
+// 只有"整片替换"和"新建列表"两种情况才记：那两种情况下列表内容 == 那个歌单，
+// 自动刷新是安全的。追加不记 —— 列表里混了用户自己加的东西，刷新会把它们冲掉。
+void playlist_source_set(const std::string & playlist_name, int64_t playlist_id);
+int64_t playlist_source_get(const std::string & playlist_name);
+void playlist_source_forget(const std::string & playlist_name);  // 播放列表被删掉时清掉对应关系
+void playlist_source_load();      // on_init：读 profile 目录里的 foo_netease_playlists.txt
+void playlist_source_save();      // 有改动就写一次
+void playlist_source_shutdown();  // on_quit：停掉刷新用的存活标记 + 兜底保存
+// 播放列表回调调用（主线程）：点中的列表若对应某个歌单，就异步重拉一次并替换内容。
+// 有冷却时间，来回点不会反复发请求；拉完发现内容没变就什么都不做。
+void playlist_source_refresh_if_mapped(t_size playlist_index);
 
 // 插到"正在播放"的下一条（右键「下一首播放」）。找不到正在播放就插到最前面。
 size_t insert_tracks_next(const std::vector<netease::TrackInfo> & tracks);
@@ -51,6 +74,8 @@ struct FeedResult {
 	bool ok = false;
 	std::string error;
 	std::string title;                      // 一句话摘要，直接显示在状态栏
+	std::string name;                       // 来源名字（歌单名等，不带"：N 首"）；新建播放列表时用它命名
+	int64_t source_playlist_id = 0;         // 来源本身就是网易云歌单时的歌单 id（每日推荐等为 0）
 	std::vector<netease::TrackInfo> tracks;
 };
 
