@@ -53,6 +53,9 @@ struct TrackInfo {
 	int64_t track_number = 0; // no：专辑内音轨号（播放列表按序号排序要用它）
 	int64_t album_id = 0;     // al.id
 	std::string cover_url;    // al.picUrl：封面图地址
+	// 非空 = 本地文件条目（「最近播放」里记下的本机播放）。
+	// 这种条目的 id 为 0，播放地址就是 local_path 本身。
+	std::string local_path;
 };
 
 struct PlaylistInfo {

@@ -49,13 +49,35 @@ public:
 			// 立刻后台预取封面：切歌会取消未完成的封面请求，不预取的话
 			// 封面就会停在旧图上（"切歌时封面不切换"）。
 			const char prefix[] = "netease://song/";
-			if (path && std::strncmp(path, prefix, sizeof(prefix) - 1) == 0) {
+			const bool is_netease = path && std::strncmp(path, prefix, sizeof(prefix) - 1) == 0;
+			// 本地文件（无 scheme，或 file://）。带别的 scheme 的伪路径（unpack:// 等）不记，
+			// 因为那种路径存下来也播不了。
+			// 注意长度用 sizeof - 1："file://" 是 7 个字符，写成 8 会把结尾的 \0 也拿去比，
+			// 于是 "file:///D:..."（第 8 个字符是 /）永远匹配不上。
+			const char file_prefix[] = "file://";
+			const bool is_local_file = path && *path &&
+				(std::strstr(path, "://") == nullptr ||
+					std::strncmp(path, file_prefix, sizeof(file_prefix) - 1) == 0);
+			if (is_netease) {
 				const int64_t id = std::strtoll(path + sizeof(prefix) - 1, nullptr, 10);
 				if (id > 0) {
 					netease_cover::prefetch_async(id);
 					// 本机播放记录：服务端不认 foobar2000 的播放，自己记一份。
 					netease_data::recent_local_add(id);
 				}
+			} else if (is_local_file) {
+				// 本机播放记录：本地文件也记一份，不然「最近播放」里永远看不到它们。
+				// 这时候标签是热的（刚读过），从 metadb 缓存里取即可，不再读盘。
+				file_info_impl info;
+				p_track->get_info(info);
+				auto meta = [&info](const char * key) {
+					const char * v = info.meta_get(key, 0);
+					return v ? std::string(v) : std::string();
+				};
+				const double length = info.get_length();
+				netease_data::recent_local_add_file(path, meta("title"), meta("artist"),
+					meta("album"), length > 0 ? static_cast<int64_t>(length * 1000.0) : 0);
+				netease_log::write("foo_netease: 本机播放记录（本地文件）—— " + std::string(path));
 			}
 		} else {
 			netease_data::set_now_playing_path(std::string());

@@ -176,9 +176,20 @@ void load_playlist_tracks_async(LivenessPtr alive, int64_t playlist_id,
 // ---- 本机播放记录 ----
 // 服务端的"最近播放"只认客户端自己的播放，foobar2000 里播的不算，
 // 所以组件自己记一份（落盘到 profile 目录），加载"最近播放"时并到最前面。
+// 本地文件也记 —— 不然"最近播放"里永远看不到它们。
+struct RecentEntry {
+	int64_t id = 0;          // > 0：网易云曲目；== 0：本地文件（看 path）
+	std::string path;        // 本地文件路径（Windows 形式，file:// 已剥掉）
+	std::string title;       // 本地文件的标签（播放那一刻从 metadb 读的，避免以后再读盘）
+	std::string artists;
+	std::string album;
+	int64_t duration_ms = 0;
+};
 void recent_local_add(int64_t song_id);
+void recent_local_add_file(const std::string & path, const std::string & title,
+	const std::string & artists, const std::string & album, int64_t duration_ms);
 void recent_local_load();
-std::vector<int64_t> recent_local_list();
+std::vector<RecentEntry> recent_local_list();
 
 void search_async(LivenessPtr alive, const std::string & keyword, int offset,
 	std::function<void(FeedResult)> done);

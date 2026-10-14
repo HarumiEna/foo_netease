@@ -6,7 +6,7 @@ foobar2000 的网易云音乐组件：登录账号、浏览歌单、直接播放
 
 [![Stars](https://img.shields.io/github/stars/HarumiEna/foo_netease?style=flat-square&label=Stars&color=blue)](https://github.com/HarumiEna/foo_netease/stargazers) [![Forks](https://img.shields.io/github/forks/HarumiEna/foo_netease?style=flat-square&label=Forks&color=blue)](https://github.com/HarumiEna/foo_netease/forks) [![Downloads](https://img.shields.io/github/downloads/HarumiEna/foo_netease/total?style=flat-square&label=Downloads&color=green)](https://github.com/HarumiEna/foo_netease/releases)
 
-- 版本 **0.22.1** ｜ Windows ｜ foobar2000 **v2.x**（x64 / Win32）
+- 版本 **0.23.0** ｜ Windows ｜ foobar2000 **v2.x**（x64 / Win32）
 - 需要 foobar2000 2.0 或更高版本
 - 第三方个人作品，与网易云音乐官方无关
 
@@ -20,6 +20,7 @@ foobar2000 的网易云音乐组件：登录账号、浏览歌单、直接播放
 - **下一首播放**：播放列表右键把歌曲排进 foobar2000 的播放队列，随机播放下也生效
 - **切换音质**：播放列表右键为这首歌选择合适的档位（标准 / 较高 / 极高 / 无损 / Hi-Res），当前账号不支持的档位不会列出；只改这一条，列表里的位置和序号不变，正在播放的那首会接着播、进度不丢
 - **漫游电台**：无限续播，只记录确实播过的曲目，歌快结束时自动补下一批
+- **最近播放**：记录你在 foobar2000 里播放过的歌 —— 网易云曲目和本地文件都会记下来，面板的「最近播放」里可以直接找到再播
 - **专辑封面**：列表里每行显示那首歌自己的封面，没有就不显示；设置里「封面跟随」可让歌词窗口上方那块大封面跟随正在播放或选中的歌（默认不干预）
 - **歌词**：播放时把歌词写到 foobar2000 配置目录的 `lyrics` 文件夹（ESLyric 等按本地歌词目录读取的插件无需配置即可用），有逐字版权时写逐字歌词；很久没再用到的会自动清理，设置里也能一键全部清空。组件自己的 `%netease_lyric%` / `%netease_lyric_enhanced%` / `%netease_yrc%` 字段与歌词窗口照旧
 - **界面缩放**：默认跟随系统 DPI，也可以在设置里手动放大（100% / 125% / 150% / 175% / 200%），改完立即生效

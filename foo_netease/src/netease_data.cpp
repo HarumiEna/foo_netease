@@ -13,12 +13,14 @@
 #include <mutex>
 #include <random>
 #include <set>
+#include <sstream>
 #include <unordered_map>
 #include <utility>
 
 #include "component_log.h"
 #include "cover_cache.h"
 #include "win_utf8.h"
+#include "core/json.h"
 #include "core/meta_cache.h"
 #include "meta_store.h"
 #include "session.h"
@@ -97,6 +99,21 @@ std::string fm_path(int64_t id, size_t index) {
 
 bool is_fm_path(const char * path) {
 	return path && std::strstr(path, "netease://song/") && std::strstr(path, "&fm=1");
+}
+
+// netease:// 的播放地址。no= 是源歌单内序号（从 1 开始）—— 写进路径，条目身份就带着它，
+// 本地排序不会改动它，用户可按 %netease_no% 还原歌单原顺序。
+std::string song_path(int64_t id, size_t index, const std::string & level) {
+	return "netease://song/" + std::to_string(id) + "?level=" + level +
+		"&no=" + std::to_string(index + 1);
+}
+
+// 一条曲目的播放地址：本地条目（「最近播放」里记下的本地文件）直接用它的路径，
+// 其余照旧给 netease:// 地址。
+std::string track_playable_path(const netease::TrackInfo & t, size_t index,
+	const std::string & level) {
+	if (!t.local_path.empty()) return t.local_path;
+	return song_path(t.id, index, level);
 }
 
 t_size fm_playlist_index(bool create) {
@@ -572,8 +589,7 @@ size_t queue_tracks_next(const std::vector<netease::TrackInfo> & tracks) {
 	const std::string level = netease::Session::instance().quality();
 	size_t n = 0;
 	for (size_t i = 0; i < tracks.size(); ++i) {
-		const std::string path = "netease://song/" + std::to_string(tracks[i].id) +
-			"?level=" + level + "&no=" + std::to_string(i + 1);
+		const std::string path = track_playable_path(tracks[i], i, level);
 		metadb_handle_ptr h = metadb::get()->handle_create(path.c_str(), 0);
 		if (!h.is_valid()) continue;
 		pm->queue_add_item(h);
@@ -588,8 +604,7 @@ size_t insert_tracks_next(const std::vector<netease::TrackInfo> & tracks) {
 	metadb_handle_list handles;
 	const std::string level = netease::Session::instance().quality();
 	for (size_t i = 0; i < tracks.size(); ++i) {
-		const std::string path = "netease://song/" + std::to_string(tracks[i].id) +
-			"?level=" + level + "&no=" + std::to_string(i + 1);
+		const std::string path = track_playable_path(tracks[i], i, level);
 		handles.add_item(metadb::get()->handle_create(path.c_str(), 0));
 	}
 	auto pm = playlist_manager::get();
@@ -620,19 +635,12 @@ size_t insert_tracks_next(const std::vector<netease::TrackInfo> & tracks) {
 
 namespace {
 
-// 一批曲目 → netease:// 句柄。
-// no= 是源歌单内序号（从 1 开始）。写进路径，条目身份就带着它，
-// 本地排序不会改动它，用户可按 %netease_no% 还原歌单原顺序。
-std::string song_path(int64_t id, size_t index, const std::string & level) {
-	return "netease://song/" + std::to_string(id) + "?level=" + level +
-		"&no=" + std::to_string(index + 1);
-}
-
+// 一批曲目 → 句柄（本地条目就是本地文件的句柄）。
 void make_song_handles(const std::vector<netease::TrackInfo> & tracks,
 	const std::string & level, metadb_handle_list & out) {
 	out.remove_all();
 	for (size_t i = 0; i < tracks.size(); ++i) {
-		const std::string path = song_path(tracks[i].id, i, level);
+		const std::string path = track_playable_path(tracks[i], i, level);
 		out.add_item(metadb::get()->handle_create(path.c_str(), 0));
 	}
 }
@@ -780,7 +788,7 @@ void rewrite_mapped_playlist(const std::string & key, FeedResult r, const std::s
 	std::vector<std::string> want;
 	want.reserve(r.tracks.size());
 	for (size_t i = 0; i < r.tracks.size(); ++i) {
-		want.push_back(song_path(r.tracks[i].id, i, level));
+		want.push_back(track_playable_path(r.tracks[i], i, level));
 	}
 	std::vector<std::string> have;
 	pm->playlist_enum_items(index, [&have](size_t, const metadb_handle_ptr & h, bool) -> bool {
@@ -1173,11 +1181,23 @@ std::string fm_mode() {
 
 namespace {
 std::mutex g_recent_mutex;
-std::deque<int64_t> g_recent_local;   // 最近播的在最前面
+std::deque<RecentEntry> g_recent_local;   // 最近播的在最前面
 
 std::string recent_file_path() {
 	const std::string dir = netease_log::profile_dir();
 	return dir.empty() ? std::string() : dir + "\\foo_netease_recent.txt";
+}
+
+// 一行一条：网易云曲目写纯数字（旧格式，保持兼容）；本地文件写一行 JSON。
+std::string entry_to_line(const RecentEntry & e) {
+	if (e.id > 0) return std::to_string(e.id);
+	std::ostringstream out;
+	out << "{\"path\":\"" << netease::json::escape(e.path) << "\""
+		<< ",\"title\":\"" << netease::json::escape(e.title) << "\""
+		<< ",\"artists\":\"" << netease::json::escape(e.artists) << "\""
+		<< ",\"album\":\"" << netease::json::escape(e.album) << "\""
+		<< ",\"duration_ms\":" << e.duration_ms << "}";
+	return out.str();
 }
 } // namespace
 
@@ -1189,8 +1209,25 @@ void recent_local_load() {
 	std::string line;
 	std::lock_guard<std::mutex> lock(g_recent_mutex);
 	while (std::getline(in, line) && g_recent_local.size() < 500) {
-		const int64_t id = std::strtoll(line.c_str(), nullptr, 10);
-		if (id > 0) g_recent_local.push_back(id);
+		while (!line.empty() && (line[line.size() - 1] == '\r' || line[line.size() - 1] == ' ')) {
+			line.erase(line.size() - 1);
+		}
+		if (line.empty()) continue;
+		if (line[0] == '{') {
+			netease::json::Value v;
+			if (!netease::json::Value::parse(line, v, nullptr)) continue;
+			RecentEntry e;
+			if (const netease::json::Value * x = v.find("path")) e.path = x->as_string();
+			if (e.path.empty()) continue;
+			if (const netease::json::Value * x = v.find("title")) e.title = x->as_string();
+			if (const netease::json::Value * x = v.find("artists")) e.artists = x->as_string();
+			if (const netease::json::Value * x = v.find("album")) e.album = x->as_string();
+			if (const netease::json::Value * x = v.find("duration_ms")) e.duration_ms = x->as_int64();
+			g_recent_local.push_back(e);
+		} else {
+			const int64_t id = std::strtoll(line.c_str(), nullptr, 10);
+			if (id > 0) { RecentEntry e; e.id = id; g_recent_local.push_back(e); }
+		}
 	}
 	netease_log::write("foo_netease: 本机播放记录已载入 —— " + std::to_string(g_recent_local.size()) + " 首");
 }
@@ -1198,30 +1235,56 @@ void recent_local_load() {
 void recent_local_save() {
 	const std::string path = recent_file_path();
 	if (path.empty()) return;
-	std::vector<int64_t> ids;
+	std::vector<RecentEntry> items;
 	{
 		std::lock_guard<std::mutex> lock(g_recent_mutex);
-		ids.assign(g_recent_local.begin(), g_recent_local.end());
+		items.assign(g_recent_local.begin(), g_recent_local.end());
 	}
 	std::ofstream out(path.c_str(), std::ios::trunc);
-	for (int64_t id : ids) out << id << "\n";
+	for (const RecentEntry & e : items) out << entry_to_line(e) << "\n";
 }
 
 void recent_local_add(int64_t song_id) {
 	if (song_id <= 0) return;
 	{
 		std::lock_guard<std::mutex> lock(g_recent_mutex);
-		g_recent_local.erase(std::remove(g_recent_local.begin(), g_recent_local.end(), song_id),
-			g_recent_local.end());
-		g_recent_local.push_front(song_id);
+		g_recent_local.erase(std::remove_if(g_recent_local.begin(), g_recent_local.end(),
+			[song_id](const RecentEntry & e) { return e.id == song_id; }), g_recent_local.end());
+		RecentEntry e;
+		e.id = song_id;
+		g_recent_local.push_front(e);
 		while (g_recent_local.size() > 500) g_recent_local.pop_back();
 	}
-	recent_local_save();   // 每切一首写一次；文件就几百个数字，开销可以忽略
+	recent_local_save();   // 每切一首写一次；文件就几百行，开销可以忽略
 }
 
-std::vector<int64_t> recent_local_list() {
+void recent_local_add_file(const std::string & path, const std::string & title,
+	const std::string & artists, const std::string & album, int64_t duration_ms) {
+	if (path.empty()) return;
+	// file:// 前缀剥掉，存的是 foobar 认的 Windows 路径。
+	std::string p = path;
+	const std::string scheme = "file://";
+	if (p.compare(0, scheme.size(), scheme) == 0) p = p.substr(scheme.size());
+	if (p.empty()) return;
+	{
+		std::lock_guard<std::mutex> lock(g_recent_mutex);
+		g_recent_local.erase(std::remove_if(g_recent_local.begin(), g_recent_local.end(),
+			[&p](const RecentEntry & e) { return e.id == 0 && e.path == p; }), g_recent_local.end());
+		RecentEntry e;
+		e.path = p;
+		e.title = title;
+		e.artists = artists;
+		e.album = album;
+		e.duration_ms = duration_ms;
+		g_recent_local.push_front(e);
+		while (g_recent_local.size() > 500) g_recent_local.pop_back();
+	}
+	recent_local_save();
+}
+
+std::vector<RecentEntry> recent_local_list() {
 	std::lock_guard<std::mutex> lock(g_recent_mutex);
-	return std::vector<int64_t>(g_recent_local.begin(), g_recent_local.end());
+	return std::vector<RecentEntry>(g_recent_local.begin(), g_recent_local.end());
 }
 
 void load_recent_async(LivenessPtr alive, std::function<void(FeedResult)> done) {
@@ -1253,15 +1316,28 @@ void load_recent_async(LivenessPtr alive, std::function<void(FeedResult)> done) 
 		netease::MetaCache::instance().put_all(r.tracks);
 		netease_app::save_meta_cache();
 		// 把本机播过的并到最前面（服务端那份不认 foobar2000 的播放）。
+		// 本地文件也在里面 —— 它们是本地条目，播放地址就是文件路径。
 		size_t local_added = 0;
 		{
-			const std::vector<int64_t> local = recent_local_list();
+			const std::vector<RecentEntry> local = recent_local_list();
 			std::vector<netease::TrackInfo> merged;
 			std::set<int64_t> taken;
-			for (int64_t id : local) {
-				if (!taken.insert(id).second) continue;
+			std::set<std::string> taken_paths;
+			for (const RecentEntry & e : local) {
 				netease::TrackInfo t;
-				if (!netease::MetaCache::instance().get(id, t)) continue;
+				if (e.id > 0) {
+					if (!taken.insert(e.id).second) continue;
+					if (!netease::MetaCache::instance().get(e.id, t)) continue;
+				} else {
+					if (e.path.empty()) continue;
+					if (!taken_paths.insert(e.path).second) continue;
+					t.id = 0;
+					t.local_path = e.path;
+					t.title = e.title;
+					t.artists = e.artists;
+					t.album = e.album;
+					t.duration_ms = e.duration_ms;
+				}
 				merged.push_back(t);
 				++local_added;
 			}
