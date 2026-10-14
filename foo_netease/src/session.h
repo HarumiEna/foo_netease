@@ -66,10 +66,14 @@ public:
 	std::string quality() const;
 	void set_quality(const std::string & level);
 
-	// --- 封面是否跟随"正在播放"（默认开） ---
-	// 关掉时按调用方给的曲目显示（通常是列表里选中的那首）。
-	bool cover_follow_now_playing() const;
-	void set_cover_follow_now_playing(bool on);
+	// --- 「封面跟随」模式 ---
+	//   0 = 面板自己决定（默认；组件不干预，列表里每行都是自己那首的封面）；
+	//   1 = 正在播放（面板问的是选中那首时，换成正在播放那首）；
+	//   2 = 选中项（面板问的是正在播放那首时，换成选中那首）。
+	// 注意 1/2 是代换：列表里正在播放 / 选中那一行的封面也会跟着变 ——
+	// foobar2000 的封面接口分不清请求来自哪个界面（而列表第一列就是封面列）。
+	int cover_follow_mode() const;
+	void set_cover_follow_mode(int mode);
 
 	// --- 播放列表光标是否跟随正在播放（默认关，见 netease_data.h 的说明） ---
 	bool follow_cursor() const;
@@ -104,7 +108,7 @@ private:
 	void apply_login_response(const json::Value & response);
 
 	std::atomic<LoginState> m_state{ LoginState::NotLoggedIn };
-	std::atomic<bool> m_cover_follow{ true };   // 封面跟随正在播放
+	std::atomic<int> m_cover_follow{ 0 };        // 封面跟随：0=面板自己决定，1=正在播放，2=选中项
 	std::atomic<bool> m_follow_cursor{ false };  // 列表光标跟随正在播放
 	std::atomic<uint64_t> m_generation{ 0 };
 	std::atomic<bool> m_shutting_down{ false };

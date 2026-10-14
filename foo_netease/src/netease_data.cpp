@@ -334,6 +334,21 @@ std::string now_playing_path() {
 }
 
 namespace {
+std::mutex g_focus_mutex;
+std::shared_ptr<const std::string> g_focus_path;   // 只在主线程写，任意线程读
+} // namespace
+
+void set_focus_path(const std::string & path) {
+	std::lock_guard<std::mutex> lock(g_focus_mutex);
+	g_focus_path = path.empty() ? nullptr : std::make_shared<const std::string>(path);
+}
+
+std::string focus_path() {
+	std::lock_guard<std::mutex> lock(g_focus_mutex);
+	return g_focus_path ? *g_focus_path : std::string();
+}
+
+namespace {
 
 // 每首歌"能切换哪些档位"的缓存。右键菜单同步构建，只能靠缓存避免每次都联网。
 std::mutex g_level_mutex;

@@ -12,7 +12,7 @@
 // 组件标识。
 DECLARE_COMPONENT_VERSION(
 	"网易云音乐 (Netease Cloud Music)",
-	"0.22.0",
+	"0.22.1",
 	"在 foobar2000 内登录网易云音乐账号、浏览歌单并直接播放。\n"
 	"\n"
 	"功能：\n"
@@ -52,6 +52,23 @@ namespace {
 
 
 // 生命周期。
+namespace {
+
+// 记下播放列表里“当前选中项”的路径，供「封面跟随：选中项」用（封面线程不能自己查，
+// 见 netease_data.h）。只能在主线程调用。
+void capture_focus_path() {
+	metadb_handle_ptr item;
+	auto pm = playlist_manager::get();
+	if (!pm.is_valid() || !pm->activeplaylist_get_focus_item_handle(item) || !item.is_valid()) {
+		netease_data::set_focus_path(std::string());
+		return;
+	}
+	const char * path = item->get_path();
+	netease_data::set_focus_path(path ? std::string(path) : std::string());
+}
+
+} // namespace
+
 // on_init() 时服务系统已可用，可以安全调用 console::print 与 configStore；
 // 但静态对象构造期间不可以。
 class netease_lifecycle : public initquit {
@@ -66,6 +83,10 @@ public:
 		// 本地歌词（<profile>\lyrics 里我们写的那几份）超过一周没再写过就清掉。
 		netease_lyric::cleanup_lrc_files();
 		netease_data::recent_local_load();
+		// 先记一次“当前选中项”，免得用户不改选中项时「封面跟随：选中项」没有可用值。
+		capture_focus_path();
+		netease_log::write("foo_netease: 当前选中项 = " +
+			(netease_data::focus_path().empty() ? std::string("(无)") : netease_data::focus_path()));
 		netease_ui::theme_watch_start();   // 跟随 foobar2000 的主题配色
 
 
@@ -88,10 +109,15 @@ public:
 class netease_playlist_watch : public playlist_callback_static {
 public:
 	unsigned get_flags() override {
-		return flag_on_playlist_activate | flag_on_playlists_removing;
+		return flag_on_playlist_activate | flag_on_playlists_removing |
+			flag_on_item_focus_change | flag_on_items_selection_change;
 	}
 
+	// 「封面跟随：选中项」要用“选中那首”的路径，见文件开头的 capture_focus_path()。
+	void capture_focus() { capture_focus_path(); }
+
 	void on_playlist_activate(t_size, t_size p_new) override {
+		capture_focus();
 		if (p_new == pfc::infinite_size) return;
 		try {
 			netease_data::playlist_source_refresh_if_mapped(p_new);
@@ -118,8 +144,9 @@ public:
 	void on_items_reordered(t_size, const t_size *, t_size) override {}
 	void on_items_removing(t_size, const bit_array &, t_size, t_size) override {}
 	void on_items_removed(t_size, const bit_array &, t_size, t_size) override {}
-	void on_items_selection_change(t_size, const bit_array &, const bit_array &) override {}
-	void on_item_focus_change(t_size, t_size, t_size) override {}
+	// 选中项变了 / 换列表了：更新“选中那首”的路径。
+	void on_items_selection_change(t_size, const bit_array &, const bit_array &) override { capture_focus(); }
+	void on_item_focus_change(t_size, t_size, t_size) override { capture_focus(); }
 	void on_items_modified(t_size, const bit_array &) override {}
 	void on_items_modified_fromplayback(t_size, const bit_array &, play_control::t_display_level) override {}
 	void on_items_replaced(t_size, const bit_array &, const pfc::list_base_const_t<t_on_items_replaced_entry> &) override {}

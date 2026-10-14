@@ -129,6 +129,13 @@ void follow_playing_deferred();
 // 所以由 play_callback 在主线程把正在播放的路径写进来，封面线程只读。
 void set_now_playing_path(const std::string & path);
 std::string now_playing_path();
+
+// ---- 播放列表里“当前选中（焦点）项”的路径缓存 ----
+//
+// 和正在播放同理：封面线程不能碰主线程 API（播放列表管理器只能在主线程问），
+// 所以由 playlist_callback 在主线程写。「封面跟随」选“选中项”时封面线程读它。
+void set_focus_path(const std::string & path);
+std::string focus_path();
 // 播放回调调用：整个列表放完了的兜底（续一批并继续播）。
 void fm_radio_on_eof();
 

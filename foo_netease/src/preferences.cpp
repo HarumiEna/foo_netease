@@ -54,8 +54,8 @@ public:
 		COMMAND_HANDLER_EX(IDC_NETEASE_LOGOUT_BTN, BN_CLICKED, OnLogout)
 		COMMAND_HANDLER_EX(IDC_NETEASE_CLEAR, BN_CLICKED, OnClear)
 		COMMAND_HANDLER_EX(IDC_NETEASE_PANEL_BTN, BN_CLICKED, OnPanel)
-		COMMAND_HANDLER_EX(IDC_NETEASE_COVER_NOW, BN_CLICKED, OnCoverNow)
 		COMMAND_HANDLER_EX(IDC_NETEASE_FOLLOW_CURSOR, BN_CLICKED, OnFollowCursor)
+		COMMAND_HANDLER_EX(IDC_NETEASE_COVER, CBN_SELCHANGE, OnCoverChanged)
 		COMMAND_HANDLER_EX(IDC_NETEASE_QUALITY, CBN_SELCHANGE, OnQualityChanged)
 		COMMAND_HANDLER_EX(IDC_NETEASE_SCALE, CBN_SELCHANGE, OnScaleChanged)
 	END_MSG_MAP()
@@ -67,17 +67,26 @@ private:
 		SetDlgItemText(IDC_NETEASE_HINT, netease::to_wide(
 			"登录后即可浏览歌单 / 每日推荐 / 漫游 / 私人雷达并直接播放；"
 			"面板可停靠在布局里（视图 → 布局 → 添加 → 网易云音乐）。"
-			"封面按条目各取各的：列表里每行显示那首歌自己的封面；"
-			"下面「无封面的条目跟随正在播放」只影响本地文件等没有封面来源的条目。"
+			"封面按条目给：列表里每行显示那首歌自己的封面，没有就是没有；"
+			"「封面跟随」默认由封面面板自己决定（组件不干预）；强制跟随正在播放 / 选中项时，"
+			"列表里那一行的封面也会跟着变（封面接口分不清请求来自哪个界面）。"
 			"日志写在 foobar2000 配置目录的 foo_netease.log。").c_str());
 		SetDlgItemText(IDC_NETEASE_LOGIN_BTN, netease::to_wide("扫码登录").c_str());
 		SetDlgItemText(IDC_NETEASE_BROWSE_BTN, netease::to_wide("浏览歌单").c_str());
 		SetDlgItemText(IDC_NETEASE_LOGOUT_BTN, netease::to_wide("登出").c_str());
 		SetDlgItemText(IDC_NETEASE_CLEAR, netease::to_wide("清除全部数据").c_str());
 		SetDlgItemText(IDC_NETEASE_PANEL_BTN, netease::to_wide("打开面板").c_str());
-		SetDlgItemText(IDC_NETEASE_COVER_NOW, netease::to_wide("无封面的条目跟随正在播放").c_str());
-		::CheckDlgButton(m_hWnd, IDC_NETEASE_COVER_NOW,
-			netease::Session::instance().cover_follow_now_playing() ? BST_CHECKED : BST_UNCHECKED);
+
+		// 封面跟随（见 album_art_netease.cpp）：默认“面板自己决定”，组件不干预。
+		SetDlgItemText(IDC_NETEASE_COVER_LBL, netease::to_wide("封面跟随：").c_str());
+		const HWND coverBox = ::GetDlgItem(m_hWnd, IDC_NETEASE_COVER);
+		const wchar_t * kCoverModes[3] = { L"面板自己决定（默认）", L"正在播放", L"选中项" };
+		for (int i = 0; i < 3; ++i) {
+			::SendMessageW(coverBox, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(kCoverModes[i]));
+		}
+		::SendMessageW(coverBox, CB_SETCURSEL,
+			netease::Session::instance().cover_follow_mode(), 0);
+
 		::SetDlgItemTextW(m_hWnd, IDC_NETEASE_FOLLOW_CURSOR,
 			netease::to_wide("列表光标跟随正在播放").c_str());
 		::CheckDlgButton(m_hWnd, IDC_NETEASE_FOLLOW_CURSOR,
@@ -159,10 +168,13 @@ private:
 		log_line(std::string("foo_netease: 光标跟随正在播放 = ") + (on ? "开" : "关"));
 	}
 
-	void OnCoverNow(UINT, int, CWindow) {
-		const bool on = ::IsDlgButtonChecked(m_hWnd, IDC_NETEASE_COVER_NOW) == BST_CHECKED;
-		netease::Session::instance().set_cover_follow_now_playing(on);
-		log_line(std::string("foo_netease: 封面跟随正在播放 = ") + (on ? "开" : "关"));
+	// 「封面跟随」下拉：面板自己决定 / 正在播放 / 选中项
+	void OnCoverChanged(UINT, int, CWindow) {
+		const HWND coverBox = ::GetDlgItem(m_hWnd, IDC_NETEASE_COVER);
+		const int index = static_cast<int>(::SendMessageW(coverBox, CB_GETCURSEL, 0, 0));
+		netease::Session::instance().set_cover_follow_mode(index);
+		log_line(std::string("foo_netease: 封面跟随 = ") +
+			(index == 1 ? "正在播放" : (index == 2 ? "选中项" : "面板自己决定")));
 	}
 
 	void OnPanel(UINT, int, CWindow) {

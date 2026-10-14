@@ -87,13 +87,14 @@ std::string cover_url_for(int64_t id, abort_callback & abort) {
 // 一次封面查询的实例：真正下载发生在 query() 里，foobar2000 需要图时才会调用。
 class netease_cover_instance : public album_art_extractor_instance_v2 {
 public:
-	// follow_now = true 时**不把封面定死在 open() 那一刻**：
-	// 每次 query() 都重新看"现在在放什么"。因为 foobar2000 会按条目缓存
-	// 提取器实例，而"封面跟随正在播放"返回的图与条目无关 ——
-	// 定死的话切歌后同一个实例会一直吐旧图（用户实测：切歌不切换，
-	// 要再点一下界面触发重新请求才更新）。
-	netease_cover_instance(int64_t id, std::string url, bool follow_now)
-		: m_id(id), m_url(std::move(url)), m_follow_now(follow_now) {}
+	// 这张图该跟着谁走：
+	//   pinned      —— 钉死在 open() 那一条上（列表逐行封面就是这种）；
+	//   now_playing —— 每次 query() 重新取正在播放那首（「封面跟随：正在播放」替过来时用）；
+	//   focused     —— 每次 query() 重新取当前选中那首（「封面跟随：选中项」替过来时用）。
+	// 后两种必须每次重取：foobar2000 会按条目缓存提取器实例，钉死的话换歌/换选中项后一直吐旧图。
+	enum class target { pinned, now_playing, focused };
+	netease_cover_instance(int64_t id, std::string url, target t)
+		: m_id(id), m_url(std::move(url)), m_target(t) {}
 
 	// 按 id 出图：先缓存、再下载，被取消就等一下预取。
 	album_art_data_ptr query_for(int64_t id, abort_callback & p_abort) {
@@ -128,12 +129,17 @@ public:
 		return album_art_data_impl::g_create(m_bytes.data(), m_bytes.size());
 	}
 
-	// 当前该显示哪首歌的封面：跟随正在播放时每次重新取。
+	// 当前该显示哪首歌的封面。
 	int64_t target_id() const {
-		if (!m_follow_now) return m_id;
-		const std::string now = netease_data::now_playing_path();
-		const int64_t now_id = parse_song_id(now.c_str());
-		return now_id > 0 ? now_id : m_id;
+		if (m_target == target::now_playing) {
+			const int64_t now = parse_song_id(netease_data::now_playing_path().c_str());
+			return now > 0 ? now : m_id;
+		}
+		if (m_target == target::focused) {
+			const int64_t focus = parse_song_id(netease_data::focus_path().c_str());
+			return focus > 0 ? focus : m_id;
+		}
+		return m_id;
 	}
 
 	album_art_data_ptr query(const GUID & what, abort_callback & p_abort) override {
@@ -156,7 +162,7 @@ private:
 	std::string m_url;
 	std::string m_bytes;      // 下载到的图片字节
 	bool m_cached = false;
-	bool m_follow_now = false;
+	target m_target = target::pinned;
 };
 
 class netease_album_art_fallback : public album_art_fallback {
@@ -166,28 +172,46 @@ public:
 		// 兜底：这个函数跑在封面加载线程，抛任何非 foobar2000 的异常都可能直接把进程带走，
 		// 所以统一收敛成"没有封面"。
 		try {
-		// 取哪首歌的封面：**以调用方给的条目为准**。
-		// 播放列表逐行画封面时，每一行都会带着自己那条来要图，必须按条目出图 ——
-		// 以前这里只要开着"封面跟随正在播放"就无条件用正在播放那首，
-		// 结果整列封面全被顶成同一张（用户实测：列表显示封面时所有歌都是同一个封面）。
-		// 只有请求方**没给**网易云曲目（本地文件、空请求）时才拿正在播放那首兜底，
-		// "跟随正在播放"在这个意义上才真正有用。
+		// 取哪首歌的封面：默认按请求方给的那条出图（播放列表逐行画封面就是这条路）。
+		//
+		// 设置里的「封面跟随」只管一件事：歌词窗口上面那块大封面该跟着谁 ——
+		//   正在播放：面板问的是“选中项”时，改成正在播放那首；
+		//   选中项  ：面板问的是“正在播放”时，改成选中那首。
+		// 两个 id 都对得上（面板本来就跟着它要的那首）时不动，列表其余各行也不动。
+		//
+		// 请求里没有网易云曲目（本地文件等）就是没有封面，不拿别的歌顶替。
 		// 注意：这里**不能**调用 playback_control::get_now_playing()。
-		// open() 跑在"专辑封面加载线程"上，那样会让进程崩掉
+		// open() 跑在“专辑封面加载线程”上，那样会让进程崩掉
 		//（实测崩溃：专辑封面加载线程=>album_art_manager_v2::open，函数栈检查失败）。
-		// 正在播放的路径由 play_callback 在主线程写好，这里只读缓存。
-		const bool follow_now = netease::Session::instance().cover_follow_now_playing();
+		// 正在播放 / 选中项的路径都由主线程的回调写好，这里只读缓存。
 		int64_t asked_id = 0;
 		for (t_size i = 0; i < items.get_count(); ++i) {
 			asked_id = parse_song_id(items[i]->get_path());
 			if (asked_id > 0) break;
 		}
+		if (asked_id <= 0) throw exception_album_art_not_found();
+
+		// 「封面跟随」模式：0=面板自己决定（默认，组件完全不干预 —— 列表里每行都是
+		// 自己那首的封面，没有就是没有）；1=正在播放；2=选中项。1/2 只在面板问的那首
+		// 和设置里要跟的那首对不上时代换，代价是列表里那一行的封面也会跟着变。
+		const int follow_mode = netease::Session::instance().cover_follow_mode();
+		const int64_t now_id = parse_song_id(netease_data::now_playing_path().c_str());
+		const int64_t focus_id = parse_song_id(netease_data::focus_path().c_str());
 		int64_t id = asked_id;
-		if (id <= 0 && follow_now) {
-			const std::string now = netease_data::now_playing_path();
-			id = parse_song_id(now.c_str());
+		netease_cover_instance::target target = netease_cover_instance::target::pinned;
+		if (follow_mode == 1) {
+			// 跟随正在播放：面板问的是选中那首 → 换成正在播放那首。
+			if (now_id > 0 && focus_id > 0 && asked_id == focus_id && focus_id != now_id) {
+				id = now_id;
+				target = netease_cover_instance::target::now_playing;
+			}
+		} else if (follow_mode == 2) {
+			// 跟随选中项：面板问的是正在播放那首 → 换成选中那首。
+			if (now_id > 0 && focus_id > 0 && asked_id == now_id && now_id != focus_id) {
+				id = focus_id;
+				target = netease_cover_instance::target::focused;
+			}
 		}
-		if (id <= 0) throw exception_album_art_not_found();
 
 		bool want_cover = false;
 		for (t_size i = 0; i < ids.get_count(); ++i) {
@@ -198,8 +222,8 @@ public:
 		const std::string url = cover_url_for(id, p_abort);
 		if (url.empty()) throw exception_album_art_not_found();
 
-		// 取证用：把"请求方给的条目"也打出来 —— 自动切歌时到底有没有人来要图，
-		// 一眼就能看出来（用户反馈：自动切歌要交互一下封面才换）。
+		// 取证用：把“请求方给的条目”也打出来 —— 自动切歌 / 切换选中项时
+		// 到底有没有人来要图，一眼就能看出来。
 		{
 			std::string asked = "无";
 			if (items.get_count() > 0) {
@@ -207,14 +231,13 @@ public:
 				asked = std::string("共 ") + std::to_string(items.get_count()) + " 条，首条=" +
 					(first ? first : "(null)");
 			}
-			netease_log::write("foo_netease: 封面请求 —— 请求方给的是[" + asked + "]，跟随正在播放=" +
-				(follow_now ? "是" : "否") + "，要 id=" + std::to_string(asked_id) + "，最终用 id=" +
-				std::to_string(id) + " -> " + url +
-				(id != asked_id ? "（请求里没有网易云曲目，兜底用正在播放那首）" : ""));
+			const char * mode_name = (follow_mode == 1) ? "正在播放" : ((follow_mode == 2) ? "选中项" : "面板自己决定");
+			netease_log::write("foo_netease: 封面请求 —— 请求方给的是[" + asked + "]，封面跟随=" +
+				mode_name + "，要 id=" + std::to_string(asked_id) +
+				"，最终用 id=" + std::to_string(id) + " -> " + url +
+				(id != asked_id ? "（面板要的不是设置里跟随的那首，按设置换掉）" : ""));
 		}
-		// 只有走"没条目 → 正在播放"兜底时，实例才跟着正在播放走（切歌重新取图）；
-		// 按条目出图的实例必须钉死在它那一条上，否则列表每行都会被顶成同一张。
-		return fb2k::service_new<netease_cover_instance>(id, url, follow_now && asked_id <= 0);
+		return fb2k::service_new<netease_cover_instance>(id, url, target);
 		} catch (const exception_album_art_not_found &) {
 			throw;   // foobar2000 自己的"没有封面"，照常传递
 		} catch (const std::exception & ex) {

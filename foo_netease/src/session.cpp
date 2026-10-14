@@ -16,7 +16,7 @@ namespace {
 const char * kCfgCredentials = "foo_netease.credentials"; // DPAPI 密文的 base64
 const char * kCfgQuality = "foo_netease.quality";
 const char * kCfgAccount = "foo_netease.account";         // "uid|nickname"
-const char * kCfgCoverFollow = "foo_netease.cover_follow"; // "1"/"0"
+const char * kCfgCoverFollow = "foo_netease.cover_follow"; // "playing"/"focus"；其它值=面板自己决定
 const char * kCfgFollowCursor = "foo_netease.follow_cursor"; // "1"/"0"
 
 const int kPollIntervalMs = 2000;
@@ -154,11 +154,12 @@ void Session::publish(const CookieJar & worker_jar) {
 	m_jar = worker_jar;
 }
 
-bool Session::cover_follow_now_playing() const { return m_cover_follow.load(); }
+int Session::cover_follow_mode() const { return m_cover_follow.load(); }
 
-void Session::set_cover_follow_now_playing(bool on) {
-	m_cover_follow = on;
-	cfg_set(kCfgCoverFollow, on ? "1" : "0");
+void Session::set_cover_follow_mode(int mode) {
+	const int clamped = (mode == 1 || mode == 2) ? mode : 0;
+	m_cover_follow = clamped;
+	cfg_set(kCfgCoverFollow, clamped == 1 ? "playing" : (clamped == 2 ? "focus" : "panel"));
 }
 
 bool Session::follow_cursor() const { return m_follow_cursor.load(); }
@@ -187,8 +188,12 @@ void Session::load_credentials() {
 	m_quality = cfg_get(kCfgQuality);
 	if (m_quality.empty()) m_quality = "exhigh";
 
-	// 封面跟随"正在播放"：默认开，只有显式存过 "0" 才关。
-	m_cover_follow = (cfg_get(kCfgCoverFollow) != "0");
+	// 封面跟随：默认“面板自己决定”（组件不干预）。只有显式存过 playing/focus 才代换，
+	// 这样列表里每行都还是自己那首的封面。
+	{
+		const std::string cover = cfg_get(kCfgCoverFollow);
+		m_cover_follow = (cover == "playing") ? 1 : ((cover == "focus") ? 2 : 0);
+	}
 	m_follow_cursor = (cfg_get(kCfgFollowCursor) == "1");   // 默认关
 
 	if (!stored.empty()) {
