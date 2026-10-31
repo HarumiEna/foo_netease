@@ -66,6 +66,10 @@ public:
 	std::string quality() const;
 	void set_quality(const std::string & level);
 
+	// --- 下载保存目录（空 = 用默认：<音乐>\网易云音乐，再退到 profile\downloads） ---
+	std::string download_dir() const;
+	void set_download_dir(const std::string & dir);
+
 	// --- 「封面跟随」模式 ---
 	//   0 = 面板自己决定（默认；组件不干预，列表里每行都是自己那首的封面）；
 	//   1 = 正在播放（面板问的是选中那首时，换成正在播放那首）；
@@ -119,6 +123,7 @@ private:
 	CookieJar m_jar;                     // 已发布的快照（UI / 播放可读）
 	AccountInfo m_account;
 	std::string m_quality;
+	std::string m_download_dir;
 
 	std::thread m_worker;                // 只保留最后一个工作线程，join 在 shutdown
 

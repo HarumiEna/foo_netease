@@ -8,7 +8,9 @@
 
 #include <commctrl.h>
 
+#include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -1263,6 +1265,46 @@ service_factory_single_t<ui_element_panel> g_ui_element_panel_factory;
 } // namespace
 
 namespace netease_ui {
+
+namespace {
+std::mutex g_child_mutex;
+std::map<HWND, ui_element_instance::ptr> g_child_panels;
+} // namespace
+
+HWND create_panel_child(HWND parent) {
+	try {
+		// 走 ui_element 服务的 instantiate(parent, config, callback) —— 它会把窗口建成
+		// 指定父窗口的子窗口，正好适合 Columns UI 面板。
+		service_ptr_t<ui_element> elem;
+		if (!ui_element::g_find(elem, guid_panel) || !elem.is_valid()) return nullptr;
+		ui_element_instance::ptr inst = elem->instantiate(
+			reinterpret_cast<fb2k::hwnd_t>(parent),
+			ui_element_config::g_create_empty(guid_panel), nullptr);
+		if (!inst.is_valid()) return nullptr;
+		HWND wnd = reinterpret_cast<HWND>(inst->get_wnd());
+		if (!wnd) return nullptr;
+		{
+			std::lock_guard<std::mutex> lock(g_child_mutex);
+			g_child_panels[wnd] = inst;
+		}
+		return wnd;
+	} catch (...) {
+		return nullptr;
+	}
+}
+
+void destroy_panel_child(HWND wnd) {
+	ui_element_instance::ptr inst;
+	{
+		std::lock_guard<std::mutex> lock(g_child_mutex);
+		auto it = g_child_panels.find(wnd);
+		if (it == g_child_panels.end()) return;
+		inst = it->second;
+		g_child_panels.erase(it);
+	}
+	::DestroyWindow(reinterpret_cast<HWND>(inst->get_wnd()));
+	inst.release();
+}
 
 void open_panel_window() {
 	service_ptr_t<ui_element> elem;

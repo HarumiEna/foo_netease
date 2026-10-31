@@ -1,4 +1,6 @@
 #pragma once
+#include <windows.h>
+
 // 网易云音乐可停靠面板（ui_element，子类 utility）。
 //
 // 与「浏览歌单」模态窗口的区别：它是常驻的，可以作为分栏 / 标签页留在布局里，
@@ -10,6 +12,11 @@ namespace netease_ui {
 // 以独立窗口打开面板。布局里也能添加它；这里额外给一个确定性入口
 //（设置页的「打开面板」按钮），便于快速查看与自动化验证。
 void open_panel_window();
+
+// Columns UI 面板化用（见 cui_panel.cpp）：建/销毁一个网易云面板子窗口。
+// 销毁必须在主线程调，且只调一次。
+HWND create_panel_child(HWND parent);
+void destroy_panel_child(HWND wnd);
 
 } // namespace netease_ui
 

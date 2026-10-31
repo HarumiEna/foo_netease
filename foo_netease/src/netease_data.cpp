@@ -8,7 +8,9 @@
 #include <functional>
 #include <memory>
 #include <deque>
+#include <filesystem>
 #include <fstream>
+#include <shlobj.h>
 #include <map>
 #include <mutex>
 #include <random>
@@ -20,6 +22,7 @@
 #include "component_log.h"
 #include "cover_cache.h"
 #include "win_utf8.h"
+#include "core/http.h"
 #include "core/json.h"
 #include "core/meta_cache.h"
 #include "meta_store.h"
@@ -1287,6 +1290,311 @@ std::vector<RecentEntry> recent_local_list() {
 	return std::vector<RecentEntry>(g_recent_local.begin(), g_recent_local.end());
 }
 
+// ============================================================================
+// 下载索引：用户下载过的曲目 → 本地文件。播放时优先走本地。
+// ============================================================================
+
+namespace {
+std::mutex g_dl_index_mutex;
+std::map<int64_t, std::string> g_dl_index;
+
+std::string downloads_file_path() {
+	const std::string dir = netease_log::profile_dir();
+	return dir.empty() ? std::string() : dir + "\\foo_netease_downloads.txt";
+}
+
+void downloads_save_locked() {
+	const std::string path = downloads_file_path();
+	if (path.empty()) return;
+	std::ofstream out(path.c_str(), std::ios::trunc);
+	for (const auto & item : g_dl_index) {
+		out << item.first << '\t' << item.second << "\n";
+	}
+}
+} // namespace
+
+void downloads_load() {
+	const std::string path = downloads_file_path();
+	if (path.empty()) return;
+	std::ifstream in(path.c_str());
+	if (!in) return;
+	std::lock_guard<std::mutex> lock(g_dl_index_mutex);
+	std::string line;
+	while (std::getline(in, line)) {
+		while (!line.empty() && (line[line.size() - 1] == '\r' || line[line.size() - 1] == ' ')) {
+			line.erase(line.size() - 1);
+		}
+		const size_t tab = line.find('\t');
+		if (tab == std::string::npos || tab == 0) continue;
+		const int64_t id = std::strtoll(line.substr(0, tab).c_str(), nullptr, 10);
+		const std::string file = line.substr(tab + 1);
+		if (id > 0 && !file.empty()) g_dl_index[id] = file;
+	}
+	netease_log::write("foo_netease: 下载索引已载入 —— " + std::to_string(g_dl_index.size()) + " 首");
+}
+
+void downloads_remember(int64_t song_id, const std::string & path) {
+	if (song_id <= 0 || path.empty()) return;
+	std::lock_guard<std::mutex> lock(g_dl_index_mutex);
+	g_dl_index[song_id] = path;
+	downloads_save_locked();
+}
+
+bool local_file_for(int64_t song_id, std::string & path) {
+	std::lock_guard<std::mutex> lock(g_dl_index_mutex);
+	auto it = g_dl_index.find(song_id);
+	if (it == g_dl_index.end()) return false;
+	std::error_code ec;
+	if (!std::filesystem::exists(std::filesystem::path(netease::to_wide(it->second)), ec) || ec) {
+		// 文件被删了/改名了：条目作废，回落到在线播放。
+		netease_log::write("foo_netease: 下载的文件不在了，回退在线播放 id=" +
+			std::to_string(song_id) + " —— " + it->second);
+		g_dl_index.erase(it);
+		downloads_save_locked();
+		return false;
+	}
+	path = it->second;
+	return true;
+}
+// ============================================================================
+// 下载：按当前音质档位取直链，流式写盘到「设置 → 下载 → 保存位置」。
+// ============================================================================
+
+namespace {
+
+std::mutex g_dl_mutex;
+std::set<int64_t> g_dl_active;   // 正在下载的曲目（同 id 不重复下）
+
+// Windows 文件名里不能出现的字符换成下划线；顺便去掉首尾的空格和点。
+std::string sanitize_file_name(const std::string & in) {
+	std::string out;
+	out.reserve(in.size());
+	for (char c : in) {
+		const unsigned char u = static_cast<unsigned char>(c);
+		switch (c) {
+		case '\\': case '/': case ':': case '*': case '?': case '"': case '<': case '>': case '|':
+			out += '_';
+			break;
+		default:
+			out += (u < 0x20) ? '_' : c;
+			break;
+		}
+	}
+	while (!out.empty() && (out[out.size() - 1] == ' ' || out[out.size() - 1] == '.')) out.erase(out.size() - 1);
+	size_t first = 0;
+	while (first < out.size() && (out[first] == ' ' || out[first] == '.')) ++first;
+	if (first >= out.size()) return std::string("未知曲目");
+	return out.substr(first);
+}
+
+std::string join_path(const std::string & dir, const std::string & name) {
+	if (dir.empty()) return name;
+	const char last = dir[dir.size() - 1];
+	return (last == '\\' || last == '/') ? dir + name : dir + "\\" + name;
+}
+
+// 提示走 foobar2000 的浮动弹窗；必须在主线程调。
+void toast(const std::string & text, bool error) {
+	fb2k::inMainThread([text, error] {
+		popup_message::g_show(text.c_str(), "网易云音乐",
+			error ? popup_message::icon_error : popup_message::icon_information);
+	});
+}
+
+// 把歌词、封面和基本元数据写进下载好的文件（失败只记日志，不影响下载结果）。
+// 这样文件拿到别的播放器里也能显示封面和歌词。
+void embed_metadata(int64_t id, const std::string & path, const netease::TrackInfo & meta,
+	const std::string & lyric, const std::string & cover) {
+	abort_callback_dummy abort;
+	try {
+		service_ptr_t<input_info_writer> in;
+		input_entry::g_open_for_info_write(in, nullptr, path.c_str(), abort);
+		file_info_impl info;
+		in->get_info(0, info, abort);
+		if (!meta.title.empty()) info.meta_set("TITLE", meta.title.c_str());
+		if (!meta.artists.empty()) info.meta_set("ARTIST", meta.artists.c_str());
+		if (!meta.album.empty()) info.meta_set("ALBUM", meta.album.c_str());
+		const std::string id_text = std::to_string(id);
+		info.meta_set("NETEASE_ID", id_text.c_str());
+		if (!lyric.empty()) info.meta_set("LYRICS", lyric.c_str());
+		in->set_info(0, info, abort);
+		in->commit(abort);
+		netease_log::write("foo_netease: 下载后写入标签（歌词 " + std::to_string(lyric.size()) +
+			" 字节）—— " + path);
+	} catch (const std::exception & ex) {
+		netease_log::write(std::string("foo_netease: 写标签失败 —— ") + ex.what());
+	} catch (...) {
+		netease_log::write("foo_netease: 写标签失败（未知异常）");
+	}
+
+	if (cover.empty()) return;
+	try {
+		album_art_editor_instance_ptr editor = album_art_editor::g_open(nullptr, path.c_str(), abort);
+		album_art_data_ptr data = album_art_data_impl::g_create(cover.data(), cover.size());
+		editor->set(album_art_ids::cover_front, data, abort);
+		editor->commit(abort);
+		netease_log::write("foo_netease: 下载后写入内嵌封面 —— " + path);
+	} catch (const std::exception & ex) {
+		netease_log::write(std::string("foo_netease: 写封面失败 —— ") + ex.what());
+	} catch (...) {
+		netease_log::write("foo_netease: 写封面失败（未知异常）");
+	}
+}
+void download_one(int64_t id, std::string level) {
+	netease::TrackInfo meta;
+	const bool has_meta = netease::MetaCache::instance().get(id, meta);
+	const std::string display = (has_meta && !meta.title.empty())
+		? (meta.artists.empty() ? meta.title : meta.artists + " - " + meta.title)
+		: ("id=" + std::to_string(id));
+
+	netease::CookieJar jar;
+	jar.deserialize(netease::Session::instance().cookie_header());
+	netease::NeteaseApi api(jar, 20000);
+	const std::string want = level.empty() ? netease::Session::instance().quality() : level;
+	netease::SongUrlInfo info = api.song_url_with_fallback(id, want);
+	if (info.url.empty()) {
+		const std::string why = info.has_free_trial
+			? std::string("该曲目当前只能试听片段（未登录或不是会员）")
+			: (info.error.empty() ? std::string("拿不到播放直链") : info.error);
+		netease_log::write("foo_netease: 下载失败 id=" + std::to_string(id) + " —— " + why);
+		toast("下载失败：" + display + "\n" + why, true);
+		return;
+	}
+
+	std::string ext = info.type;
+	if (ext.empty()) ext = "mp3";
+	const std::string base = sanitize_file_name(display);
+	const std::string dir = download_dir();
+	if (!dir.empty()) {
+		std::error_code ec;
+		std::filesystem::create_directories(std::filesystem::path(netease::to_wide(dir)), ec);
+	}
+	const std::string target = join_path(dir, base + "." + ext);
+	const std::string part = target + ".part";
+
+	netease::HttpRequestOptions options;
+	options.timeout_ms = 30000;
+	options.headers.push_back({ "Referer", "https://music.163.com" });
+	options.headers.push_back({ "User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" });
+	options.abort_requested = [] { return false; };
+
+	netease::HttpStream stream;
+	std::string error;
+	if (!stream.open(info.url, jar, options, 0, &error)) {
+		netease_log::write("foo_netease: 下载失败 id=" + std::to_string(id) + " —— 连接：" + error);
+		toast("下载失败：" + display + "\n" + error, true);
+		return;
+	}
+
+	const std::wstring wide_part = netease::to_wide(part);
+	FILE * fp = nullptr;
+	if (_wfopen_s(&fp, wide_part.c_str(), L"wb") != 0 || !fp) {
+		stream.close();
+		netease_log::write("foo_netease: 下载失败 id=" + std::to_string(id) + " —— 写不了文件：" + part);
+		toast("下载失败：写不了文件\n" + dir, true);
+		return;
+	}
+
+	uint64_t written = 0;
+	std::vector<char> buffer(256 * 1024);
+	for (;;) {
+		const int64_t n = stream.read(buffer.data(), buffer.size(), &error);
+		if (n < 0) break;
+		if (n == 0) { error.clear(); break; }
+		if (fwrite(buffer.data(), 1, static_cast<size_t>(n), fp) != static_cast<size_t>(n)) {
+			error = "写盘失败（磁盘满？）";
+			break;
+		}
+		written += static_cast<uint64_t>(n);
+	}
+	fclose(fp);
+	stream.close();
+
+	if (!error.empty() || written == 0) {
+		_wremove(wide_part.c_str());
+		const std::string why = error.empty() ? std::string("没收到数据") : error;
+		netease_log::write("foo_netease: 下载失败 id=" + std::to_string(id) + " —— " + why);
+		toast("下载失败：" + display + "\n" + why, true);
+		return;
+	}
+
+	if (!::MoveFileExW(wide_part.c_str(), netease::to_wide(target).c_str(),
+		MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+		_wremove(wide_part.c_str());
+		netease_log::write("foo_netease: 下载失败 id=" + std::to_string(id) + " —— 改名失败");
+		toast("下载失败：写不进 " + dir, true);
+		return;
+	}
+
+	// 记进索引：下次播放这首就直接走本地文件。
+	downloads_remember(id, target);
+
+	// 歌词 + 封面一并写进文件里（别的播放器也能看到）。
+	std::string lyric;
+	{
+		std::string translated;
+		if (!api.lyrics(id, lyric, translated).ok) lyric.clear();
+	}
+	std::string cover;
+	if (!meta.cover_url.empty()) {
+		netease::HttpRequestOptions cover_options;
+		cover_options.timeout_ms = 20000;
+		cover_options.headers.push_back({ "Referer", "https://music.163.com" });
+		cover_options.headers.push_back({ "User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" });
+		cover_options.abort_requested = [] { return false; };
+		netease::HttpResult cover_result = netease::http_get(meta.cover_url, jar, cover_options);
+		if (cover_result.ok) cover = cover_result.response.body;
+	}
+	embed_metadata(id, target, meta, lyric, cover);
+
+	const int mb = static_cast<int>(written / (1024 * 1024));
+	netease_log::write("foo_netease: 下载完成 id=" + std::to_string(id) + " 档位=" + info.level +
+		" 格式=" + ext + " " + std::to_string(mb) + " MB → " + target);
+	toast("下载完成：" + base + "." + ext, false);
+}
+
+} // namespace
+
+std::string default_download_dir() {
+	wchar_t path[MAX_PATH] = {};
+	if (SUCCEEDED(::SHGetFolderPathW(nullptr, CSIDL_MYMUSIC, nullptr, 0, path)) && path[0]) {
+		return join_path(netease::to_utf8(path), "网易云音乐");
+	}
+	const std::string profile = netease_log::profile_dir();
+	return profile.empty() ? std::string("downloads") : join_path(profile, "downloads");
+}
+
+std::string download_dir() {
+	const std::string configured = netease::Session::instance().download_dir();
+	return configured.empty() ? default_download_dir() : configured;
+}
+
+size_t start_downloads(const std::vector<int64_t> & ids, const std::string & level) {
+	size_t started = 0;
+	for (int64_t id : ids) {
+		if (id <= 0) continue;
+		{
+			std::lock_guard<std::mutex> lock(g_dl_mutex);
+			if (!g_dl_active.insert(id).second) continue;
+		}
+		++started;
+		netease::TrackInfo meta;
+		netease::MetaCache::instance().get(id, meta);
+		netease_log::write("foo_netease: 开始下载 id=" + std::to_string(id) + " —— " +
+			(meta.title.empty() ? std::string("(元数据未缓存)") : (meta.artists + " - " + meta.title)) +
+			" 档位=" + (level.empty() ? netease::Session::instance().quality() : level));
+		fb2k::splitTask([id, level] {
+			try {
+				download_one(id, level);
+			} catch (...) {
+				netease_log::write("foo_netease: 下载异常 id=" + std::to_string(id));
+			}
+			std::lock_guard<std::mutex> lock(g_dl_mutex);
+			g_dl_active.erase(id);
+		});
+	}
+	return started;
+}
 void load_recent_async(LivenessPtr alive, std::function<void(FeedResult)> done) {
 	run_async(alive, done, [](netease::NeteaseApi & api) {
 		FeedResult r;

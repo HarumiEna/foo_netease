@@ -15,6 +15,7 @@ namespace {
 // configStore 里用的键名。configStore 是 v2.0 起的 SQLite 配置库。
 const char * kCfgCredentials = "foo_netease.credentials"; // DPAPI 密文的 base64
 const char * kCfgQuality = "foo_netease.quality";
+const char * kCfgDownloadDir = "foo_netease.download_dir";   // 空 = 用默认目录
 const char * kCfgAccount = "foo_netease.account";         // "uid|nickname"
 const char * kCfgCoverFollow = "foo_netease.cover_follow"; // "playing"/"focus"；其它值=面板自己决定
 const char * kCfgFollowCursor = "foo_netease.follow_cursor"; // "1"/"0"
@@ -144,6 +145,19 @@ void Session::set_quality(const std::string & level) {
 	cfg_set(kCfgQuality, level);
 }
 
+std::string Session::download_dir() const {
+	std::lock_guard<std::mutex> lock(m_mutex);
+	return m_download_dir;
+}
+
+void Session::set_download_dir(const std::string & dir) {
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		m_download_dir = dir;
+	}
+	cfg_set(kCfgDownloadDir, dir);
+}
+
 std::string Session::cookie_header() const {
 	std::lock_guard<std::mutex> lock(m_mutex);
 	return m_jar.header_value();
@@ -187,6 +201,7 @@ void Session::load_credentials() {
 	const std::string stored = cfg_get(kCfgCredentials);
 	m_quality = cfg_get(kCfgQuality);
 	if (m_quality.empty()) m_quality = "exhigh";
+	m_download_dir = cfg_get(kCfgDownloadDir);
 
 	// 封面跟随：默认“面板自己决定”（组件不干预）。只有显式存过 playing/focus 才代换，
 	// 这样列表里每行都还是自己那首的封面。

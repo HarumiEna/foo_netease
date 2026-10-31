@@ -16,6 +16,9 @@
 #include "ui_scale.h"
 #include "win_utf8.h"
 
+#include <filesystem>
+#include <shellapi.h>
+
 namespace {
 
 // 界面缩放档位（百分比；100 = 完全跟随系统 DPI）。
@@ -58,19 +61,29 @@ public:
 		COMMAND_HANDLER_EX(IDC_NETEASE_COVER, CBN_SELCHANGE, OnCoverChanged)
 		COMMAND_HANDLER_EX(IDC_NETEASE_QUALITY, CBN_SELCHANGE, OnQualityChanged)
 		COMMAND_HANDLER_EX(IDC_NETEASE_SCALE, CBN_SELCHANGE, OnScaleChanged)
+		COMMAND_HANDLER_EX(IDC_NETEASE_DL_BROWSE, BN_CLICKED, OnDownloadBrowse)
+		COMMAND_HANDLER_EX(IDC_NETEASE_DL_OPEN, BN_CLICKED, OnDownloadOpen)
+		COMMAND_HANDLER_EX(IDC_NETEASE_DL_DIR, EN_KILLFOCUS, OnDownloadDirChanged)
 	END_MSG_MAP()
 
 private:
 	BOOL OnInitDialog(CWindow, LPARAM) {
 		m_dark.AddDialogWithControls(*this);
 
+		// 分组标题与各分区文案（.rc 里只放 ASCII，中文统一在这里设）。
+		SetDlgItemText(IDC_NETEASE_SEC_ACCOUNT, netease::to_wide("账号").c_str());
+		SetDlgItemText(IDC_NETEASE_SEC_PLAY, netease::to_wide("播放").c_str());
+		SetDlgItemText(IDC_NETEASE_SEC_COVER, netease::to_wide("封面").c_str());
+		SetDlgItemText(IDC_NETEASE_SEC_DL, netease::to_wide("下载").c_str());
+		SetDlgItemText(IDC_NETEASE_DL_LBL, netease::to_wide("保存位置：").c_str());
+		SetDlgItemText(IDC_NETEASE_DL_BROWSE, netease::to_wide("浏览…").c_str());
+		SetDlgItemText(IDC_NETEASE_DL_OPEN, netease::to_wide("打开文件夹").c_str());
+		SetDlgItemText(IDC_NETEASE_DL_HINT, netease::to_wide(
+			"右键播放列表里的歌 →「下载」，按当前音质存成「歌手 - 标题.格式」。").c_str());
+		SetDlgItemText(IDC_NETEASE_DL_DIR, netease::to_wide(netease_data::download_dir()).c_str());
 		SetDlgItemText(IDC_NETEASE_HINT, netease::to_wide(
-			"登录后即可浏览歌单 / 每日推荐 / 漫游 / 私人雷达并直接播放；"
-			"面板可停靠在布局里（视图 → 布局 → 添加 → 网易云音乐）。"
-			"封面按条目给：列表里每行显示那首歌自己的封面，没有就是没有；"
-			"「封面跟随」默认由封面面板自己决定（组件不干预）；强制跟随正在播放 / 选中项时，"
-			"列表里那一行的封面也会跟着变（封面接口分不清请求来自哪个界面）。"
-			"日志写在 foobar2000 配置目录的 foo_netease.log。").c_str());
+			"「面板自己决定」= 组件不干预：列表里每行显示那首歌自己的封面，没有就是没有。"
+			"强制跟随「正在播放」/「选中项」时，列表里那一行的封面也会跟着变。").c_str());
 		SetDlgItemText(IDC_NETEASE_LOGIN_BTN, netease::to_wide("扫码登录").c_str());
 		SetDlgItemText(IDC_NETEASE_BROWSE_BTN, netease::to_wide("浏览歌单").c_str());
 		SetDlgItemText(IDC_NETEASE_LOGOUT_BTN, netease::to_wide("登出").c_str());
@@ -200,6 +213,34 @@ private:
 		log_line("foo_netease: 界面缩放设为 " + std::to_string(kScales[index]) + "%");
 	}
 
+	// 「下载」分区：保存位置。
+	void OnDownloadBrowse(UINT, int, CWindow) {
+		pfc::string8 chosen;
+		if (!uBrowseForFolder(m_hWnd, "选择下载保存位置", chosen)) return;
+		netease::Session::instance().set_download_dir(std::string(chosen.get_ptr()));
+		::SetDlgItemTextW(m_hWnd, IDC_NETEASE_DL_DIR,
+			netease::to_wide(netease_data::download_dir()).c_str());
+		log_line("foo_netease: 下载保存位置 = " + netease_data::download_dir());
+	}
+
+	void OnDownloadOpen(UINT, int, CWindow) {
+		const std::string dir = netease_data::download_dir();
+		if (dir.empty()) return;
+		std::error_code ec;
+		std::filesystem::create_directories(std::filesystem::path(netease::to_wide(dir)), ec);
+		::ShellExecuteW(nullptr, L"open", netease::to_wide(dir).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+	}
+
+	// 手输路径：失焦时存一次（EN_CHANGE 每敲一个键都写库太频繁）。
+	void OnDownloadDirChanged(UINT, int, CWindow) {
+		wchar_t buffer[1024] = {};
+		::GetDlgItemTextW(m_hWnd, IDC_NETEASE_DL_DIR, buffer, 1024);
+		std::string dir = netease::to_utf8(buffer);
+		while (!dir.empty() && (dir[0] == ' ' || dir[0] == '\t')) dir.erase(0, 1);
+		while (!dir.empty() && (dir[dir.size() - 1] == ' ' || dir[dir.size() - 1] == '\t')) dir.erase(dir.size() - 1);
+		netease::Session::instance().set_download_dir(dir);
+		log_line("foo_netease: 下载保存位置 = " + netease_data::download_dir());
+	}
 	void refresh() {
 		auto & session = netease::Session::instance();
 		std::string status = netease::login_state_text(session.state());

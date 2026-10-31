@@ -185,6 +185,19 @@ struct RecentEntry {
 	std::string album;
 	int64_t duration_ms = 0;
 };
+// ---- 下载 ----
+// 保存目录：设置里指定的；没设置就用默认（<音乐>\网易云音乐，取不到再退到 profile\downloads）。
+std::string download_dir();
+std::string default_download_dir();
+
+// ---- 下载索引（曲目 id → 已下载的本地文件）----
+// 播放时命中且文件还在就用本地文件（不走在线流）；文件被删掉会自动清掉条目并回落在线。
+void downloads_load();
+void downloads_remember(int64_t song_id, const std::string & path);
+bool local_file_for(int64_t song_id, std::string & path);
+// 下载一批曲目（后台线程，每首一个任务）。返回真正受理的数量（同 id 已在下载中的会跳过）。
+size_t start_downloads(const std::vector<int64_t> & ids, const std::string & level = std::string());
+
 void recent_local_add(int64_t song_id);
 void recent_local_add_file(const std::string & path, const std::string & title,
 	const std::string & artists, const std::string & album, int64_t duration_ms);

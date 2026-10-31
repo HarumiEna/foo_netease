@@ -3,7 +3,9 @@
 
 #include <commctrl.h>
 
+#include <helpers/BumpableElem.h>   // ui_element_impl_withpopup<>
 #include <helpers/DarkMode.h>
+#include <libPPUI/win32_op.h>    // WIN32_OP
 #include <algorithm>
 #include <memory>
 #include <mutex>
@@ -112,6 +114,28 @@ public:
 		if (GetClientRect(&rc)) layout(rc.Width(), rc.Height());
 		set_status(netease::to_wide("正在加载歌单…").c_str());
 		load_tracks_async(playlist_id);
+	}
+
+	// 面板化用：直接建一个**子窗口**实例（不碰 s_instance，和独立窗口互不影响）。
+	// 对话框模板本身是 popup 样式，这里创建后改成 WS_CHILD 并贴进父窗口。
+	static HWND create_embedded(HWND parent) {
+		BrowseWindow * w = new BrowseWindow();
+		w->m_alive = std::make_shared<Liveness>();
+		if (!w->Create(parent)) {
+			delete w;
+			return nullptr;
+		}
+		LONG style = ::GetWindowLongW(w->m_hWnd, GWL_STYLE);
+		style &= ~(WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME |
+			WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
+		style |= WS_CHILD;
+		::SetWindowLongW(w->m_hWnd, GWL_STYLE, style);
+		::SetParent(w->m_hWnd, parent);
+		RECT rc{};
+		::GetClientRect(parent, &rc);
+		::SetWindowPos(w->m_hWnd, nullptr, 0, 0, rc.right - rc.left, rc.bottom - rc.top,
+			SWP_NOZORDER | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+		return w->m_hWnd;
 	}
 
 	static void open(fb2k::hwnd_t owner) {
@@ -1338,6 +1362,74 @@ bool BrowseWindow::s_pending_search = false;
 
 } // namespace
 
+HWND create_browse_embedded(HWND parent) {
+	return BrowseWindow::create_embedded(parent);
+}
+
+// ---------------------------------------------------------------------------
+// 面板化：「歌单浏览」也能作为面板插进布局（默认 UI / Columns UI 都用这一套）。
+// ---------------------------------------------------------------------------
+class BrowsePanelWindow : public ui_element_instance, public CWindowImpl<BrowsePanelWindow> {
+public:
+	DECLARE_WND_CLASS_EX(TEXT("{5E2A7C41-9B3D-4E18-A2F0-6C8D1B4E7A39}"),
+		CS_VREDRAW | CS_HREDRAW | CS_DBLCLKS, -1);
+
+	BrowsePanelWindow(ui_element_config::ptr config, ui_element_instance_callback_ptr callback)
+		: m_config(config), m_callback(callback) {}
+
+	void initialize_window(HWND parent) { WIN32_OP(Create(parent) != NULL); }
+	void set_configuration(ui_element_config::ptr config) { m_config = config; }
+	ui_element_config::ptr get_configuration() { return m_config; }
+
+	static GUID g_get_guid() {
+		static const GUID g = { 0x2d71b8f4, 0x6c05, 0x4a3e, { 0x9b, 0x51, 0x7e, 0x08, 0xc4, 0x3a, 0x6f, 0xd2 } };
+		return g;
+	}
+	static GUID g_get_subclass() { return ui_element_subclass_utility; }
+	static void g_get_name(pfc::string_base & out) { out = "网易云音乐 · 歌单浏览"; }
+	static ui_element_config::ptr g_get_default_configuration() {
+		return ui_element_config::g_create_empty(g_get_guid());
+	}
+	static const char * g_get_description() {
+		return "把歌单浏览窗口作为面板插进布局。";
+	}
+
+	void notify(const GUID &, t_size, const void *, t_size) {}
+
+	BEGIN_MSG_MAP_EX(BrowsePanelWindow)
+		MSG_WM_CREATE(OnCreate)
+		MSG_WM_SIZE(OnSize)
+		MSG_WM_DESTROY(OnDestroy)
+	END_MSG_MAP()
+
+	BOOL OnCreate(CREATESTRUCT *) {
+		m_child = create_browse_embedded(m_hWnd);
+		return TRUE;
+	}
+
+	void OnSize(UINT, CSize size) {
+		if (m_child && ::IsWindow(m_child)) {
+			::SetWindowPos(m_child, nullptr, 0, 0, size.cx, size.cy, SWP_NOZORDER);
+		}
+	}
+
+	void OnDestroy() {
+		if (m_child && ::IsWindow(m_child)) ::DestroyWindow(m_child);
+		m_child = nullptr;
+	}
+
+private:
+	ui_element_config::ptr m_config;
+	HWND m_child = nullptr;
+
+public:
+	// ui_element_impl_withpopup 需要从这里取 callback（和 PanelWindow 一样）。
+	const ui_element_instance_callback_ptr m_callback;
+};
+
+class ui_element_browse_panel : public ui_element_impl_withpopup<BrowsePanelWindow> {};
+
+service_factory_single_t<ui_element_browse_panel> g_ui_element_browse_panel_factory;
 void show_browse_window(fb2k::hwnd_t parent) {
 	BrowseWindow::open(parent);
 }

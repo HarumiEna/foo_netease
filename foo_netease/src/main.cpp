@@ -7,12 +7,14 @@
 #include "theme.h"
 
 #include <filesystem>
+#include <fstream>
+#include <cstdlib>
 #include <windows.h>
 
 // 组件标识。
 DECLARE_COMPONENT_VERSION(
 	"网易云音乐 (Netease Cloud Music)",
-	"0.23.0",
+	"0.24.0",
 	"在 foobar2000 内登录网易云音乐账号、浏览歌单并直接播放。\n"
 	"\n"
 	"功能：\n"
@@ -83,6 +85,7 @@ public:
 		// 本地歌词（<profile>\lyrics 里我们写的那几份）超过一周没再写过就清掉。
 		netease_lyric::cleanup_lrc_files();
 		netease_data::recent_local_load();
+		netease_data::downloads_load();
 		// 先记一次“当前选中项”，免得用户不改选中项时「封面跟随：选中项」没有可用值。
 		capture_focus_path();
 		netease_log::write("foo_netease: 当前选中项 = " +

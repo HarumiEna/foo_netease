@@ -6,7 +6,7 @@ foobar2000 的网易云音乐组件：登录账号、浏览歌单、直接播放
 
 [![Stars](https://img.shields.io/github/stars/HarumiEna/foo_netease?style=flat-square&label=Stars&color=blue)](https://github.com/HarumiEna/foo_netease/stargazers) [![Forks](https://img.shields.io/github/forks/HarumiEna/foo_netease?style=flat-square&label=Forks&color=blue)](https://github.com/HarumiEna/foo_netease/forks) [![Downloads](https://img.shields.io/github/downloads/HarumiEna/foo_netease/total?style=flat-square&label=Downloads&color=green)](https://github.com/HarumiEna/foo_netease/releases)
 
-- 版本 **0.23.0** ｜ Windows ｜ foobar2000 **v2.x**（x64 / Win32）
+- 版本 **0.24.0** ｜ Windows ｜ foobar2000 **v2.x**（x64 / Win32）
 - 需要 foobar2000 2.0 或更高版本
 - 第三方个人作品，与网易云音乐官方无关
 
@@ -14,7 +14,8 @@ foobar2000 的网易云音乐组件：登录账号、浏览歌单、直接播放
 
 - **登录**：扫码登录，登录状态保存在本地
 - **可停靠面板**：每日推荐 / 漫游（私人 FM）/ 华语私人雷达 / 最近播放 / 私人雷达 / 我的歌单 / 搜索 / 搜索歌单 / 歌单链接；配色跟随 foobar2000 的明暗主题。单击选中，双击发送到当前播放列表；右键可以添加、替换、添加到新的播放列表、下一首播放，或在新窗口里单独显示某个歌单。文字过长时悬停可看完整内容
-- **歌单浏览窗口**：浏览歌单与曲目，添加或替换到当前播放列表
+- **歌单浏览窗口**：浏览歌单与曲目，添加或替换到当前播放列表；也可以当作面板插进布局（视图 → 布局 → 添加 → 网易云音乐 · 歌单浏览）
+- **支持 Columns UI**：主面板和歌单浏览面板都能插进 Columns UI 的布局（默认 UI 照旧可用）
 - **播放列表自动刷新**：用面板右键「添加到新的播放列表」建出来的列表，之后在 foobar2000 的播放列表管理器里点中它，就会自动更新一次内容；内容没有变化时不会改动列表，也不会打乱你当前选中的条目
 - **播放**：组件自己拉流，不需要官方客户端；支持云盘 Hi-Res；状态栏显示真实码率 / 采样率 / 位深 / 编码
 - **下一首播放**：播放列表右键把歌曲排进 foobar2000 的播放队列，随机播放下也生效

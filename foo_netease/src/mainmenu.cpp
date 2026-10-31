@@ -2,6 +2,9 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <set>
+#include <string>
+#include <vector>
 
 #include "browse_ui.h"
 #include "component_log.h"
@@ -380,6 +383,93 @@ public:
 };
 
 static contextmenu_item_factory_t<netease_quality_switch> g_netease_quality_switch_factory;
+
+// ---------------------------------------------------------------------------
+// 播放列表右键菜单：「下载」。
+//
+// 把选中的网易云曲目下载到「设置 → 下载 → 保存位置」（默认 <音乐>\网易云音乐），
+// 档位用设置里的音质。非网易云的条目自动跳过；同一首正在下载时不会重复受理。
+// ---------------------------------------------------------------------------
+// 叶子节点：只有选中的条目里真有网易云曲目时才显示（本地文件不显示）。
+class download_leaf_node : public contextmenu_item_node_root_leaf {
+public:
+
+	bool get_display_data(pfc::string_base & out, unsigned & flags,
+		metadb_handle_list_cref data, const GUID &) override {
+		bool any = false;
+		for (t_size i = 0; i < data.get_count() && !any; ++i) {
+			int64_t id = 0;
+			std::string query;
+			any = split_song_path(data[i]->get_path(), id, query);
+		}
+		if (!any) return false;   // 选中的全是本地/非网易云条目：整项不出现
+		out = "下载";
+		flags = 0;
+		return true;
+	}
+
+	bool get_description(pfc::string_base & out) override {
+		out = "把选中的网易云曲目下载到设置的保存位置";
+		return true;
+	}
+
+	void execute(metadb_handle_list_cref data, const GUID &) override {
+		std::vector<int64_t> ids;
+		std::set<int64_t> seen;
+		for (t_size i = 0; i < data.get_count(); ++i) {
+			int64_t id = 0;
+			std::string query;
+			if (!split_song_path(data[i]->get_path(), id, query)) continue;
+			if (seen.insert(id).second) ids.push_back(id);
+		}
+		if (ids.empty()) return;
+		const size_t started = netease_data::start_downloads(ids);
+		netease_log::write("foo_netease: 右键「下载」—— 受理 " + std::to_string(started) +
+			" 首（选中 " + std::to_string(ids.size()) + " 首网易云曲目）");
+		if (started == 0) {
+			popup_message::g_show("这些曲目已经在下载了。", "网易云音乐");
+		}
+	}
+
+	GUID get_guid() override { return pfc::guid_null; }
+	bool is_mappable_shortcut() override { return false; }
+};
+
+// ---------------------------------------------------------------------------
+// 播放列表右键菜单：「下载」。
+//
+// 用 contextmenu_item_v2 + 自定义叶子节点：只有选中项里含网易云曲目时才出现，
+// 本地文件（没有 netease:// 路径）不会看到这一项。
+// ---------------------------------------------------------------------------
+class netease_download_item : public contextmenu_item_v2 {
+public:
+	unsigned get_num_items() override { return 1; }
+
+	GUID get_item_guid(unsigned) override {
+		static const GUID guid = { 0x4a7b93e1, 0x2c58, 0x4d10, { 0x8f, 0x63, 0x71, 0xc4, 0x5a, 0x0e, 0x9b, 0x27 } };
+		return guid;
+	}
+
+	void get_item_name(unsigned, pfc::string_base & out) override { out = "下载"; }
+
+	bool get_item_description(unsigned, pfc::string_base & out) override {
+		out = "把选中的网易云曲目下载到设置的保存位置";
+		return true;
+	}
+
+	t_enabled_state get_enabled_state(unsigned) override { return contextmenu_item::DEFAULT_ON; }
+
+	GUID get_parent() override { return contextmenu_groups::root; }
+
+	contextmenu_item_node_root * instantiate_item(unsigned, metadb_handle_list_cref,
+		const GUID &) override {
+		return new download_leaf_node();
+	}
+
+	void item_execute_simple(unsigned, const GUID &, metadb_handle_list_cref, const GUID &) override {}
+};
+
+static contextmenu_item_factory_t<netease_download_item> g_netease_download_item_factory;
 
 } // namespace
 

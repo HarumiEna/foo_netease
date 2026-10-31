@@ -189,6 +189,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="component_log.cpp" />
+    <ClCompile Include="cui_panel.cpp" />
     <ClCompile Include="album_art_netease.cpp" />
     <ClCompile Include="browse_ui.cpp" />
     <ClCompile Include="http_file.cpp" />

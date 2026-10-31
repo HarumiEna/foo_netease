@@ -291,6 +291,25 @@ public:
 		}
 
 		if (p_reason == input_open_decode) {
+			// 已经下载过这首：直接播本地文件 —— 省流量、能瞬间 seek，音质也和当初下载时一致。
+			// 文件被删掉时 local_file_for() 会顺手把索引清掉，这里自然回落到下面的在线流。
+			std::string local_path;
+			if (netease_data::local_file_for(id, local_path)) {
+				try {
+					service_ptr_t<file> local_file;
+					filesystem::g_open(local_file, local_path.c_str(), filesystem::open_mode_read, p_abort);
+					input_entry::g_open_for_decoding(m_decoder, local_file, local_path.c_str(), p_abort);
+					netease_log::write("foo_netease [input] 播放本地文件 id=" + std::to_string(id) +
+						" → " + local_path);
+					netease_data::set_now_playing_path(std::string(m_path.c_str()));
+					netease_cover::prefetch_async(id);
+					netease_lyric::ensure_async(id, std::string(m_path));
+					return;
+				} catch (const std::exception & ex) {
+					netease_log::write(std::string("foo_netease [input] 本地文件打不开，回退在线：") + ex.what());
+				}
+			}
+
 			std::string url, format_type, error;
 			if (!resolve_cdn_url(id, level, url, format_type, error, p_abort)) {
 				throw exception_io_data(error.c_str());
