@@ -66,6 +66,12 @@ public:
 					netease_data::recent_local_add(id);
 				}
 			} else if (is_local_file) {
+				// 只有 foobar2000 认得的音频文件才记：用户把 .fb2k-component / .txt 之类
+				// 拖进来时 foobar 也会走一次「载入信息」，那些不该算播放记录。
+				service_ptr_t<input_entry> audio_entry;
+				const bool is_audio = input_entry::g_find_service_by_path(audio_entry, path) &&
+					audio_entry.is_valid();
+				if (!is_audio) return;
 				// 本机播放记录：本地文件也记一份，不然「最近播放」里永远看不到它们。
 				// 这时候标签是热的（刚读过），从 metadb 缓存里取即可，不再读盘。
 				file_info_impl info;

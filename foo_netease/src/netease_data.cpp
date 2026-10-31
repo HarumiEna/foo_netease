@@ -1247,6 +1247,22 @@ void recent_local_save() {
 	for (const RecentEntry & e : items) out << entry_to_line(e) << "\n";
 }
 
+// 删掉记录里指向「已经不存在的文件」的本地条目（用户把下载/本地歌删了）。
+// 不清理的话，「最近播放」里会留下死条目，foobar 打开时就是「对象未找到」。
+void recent_local_prune_paths(const std::vector<std::string> & paths) {
+	if (paths.empty()) return;
+	{
+		std::lock_guard<std::mutex> lock(g_recent_mutex);
+		g_recent_local.erase(std::remove_if(g_recent_local.begin(), g_recent_local.end(),
+			[&paths](const RecentEntry & e) {
+				return e.id == 0 && std::find(paths.begin(), paths.end(), e.path) != paths.end();
+			}), g_recent_local.end());
+	}
+	recent_local_save();
+	netease_log::write("foo_netease: 最近播放清理了 " + std::to_string(paths.size()) +
+		" 条已失效的本地记录");
+}
+
 void recent_local_add(int64_t song_id) {
 	if (song_id <= 0) return;
 	{
@@ -1631,6 +1647,7 @@ void load_recent_async(LivenessPtr alive, std::function<void(FeedResult)> done) 
 			std::vector<netease::TrackInfo> merged;
 			std::set<int64_t> taken;
 			std::set<std::string> taken_paths;
+			std::vector<std::string> stale;
 			for (const RecentEntry & e : local) {
 				netease::TrackInfo t;
 				if (e.id > 0) {
@@ -1638,6 +1655,13 @@ void load_recent_async(LivenessPtr alive, std::function<void(FeedResult)> done) 
 					if (!netease::MetaCache::instance().get(e.id, t)) continue;
 				} else {
 					if (e.path.empty()) continue;
+					// 文件已经被删/改名：这条记录作废，跳过并稍后从记录里清掉。
+					// 不跳过的后果是 fb2k 播放列表里留一个死路径，打开就报「对象未找到」。
+					std::error_code ec;
+					if (!std::filesystem::exists(std::filesystem::path(netease::to_wide(e.path)), ec) || ec) {
+						stale.push_back(e.path);
+						continue;
+					}
 					if (!taken_paths.insert(e.path).second) continue;
 					t.id = 0;
 					t.local_path = e.path;
@@ -1653,6 +1677,7 @@ void load_recent_async(LivenessPtr alive, std::function<void(FeedResult)> done) 
 				if (taken.insert(t.id).second) merged.push_back(t);
 			}
 			r.tracks = std::move(merged);
+			recent_local_prune_paths(stale);
 		}
 		r.name = "最近播放";
 		r.source_playlist_id = kPlSourceRecent;
