@@ -33,6 +33,8 @@ namespace {
 // 否则就是经典的悬垂句柄问题。
 struct Liveness {
 	std::atomic<bool> alive{ true };
+	// 回填数据时要找回窗口实例：面板实例不在 s_instance 里，只能靠这个指针。
+	void * owner = nullptr;
 };
 
 std::string format_duration(int64_t ms) {
@@ -121,6 +123,7 @@ public:
 	static HWND create_embedded(HWND parent) {
 		BrowseWindow * w = new BrowseWindow();
 		w->m_alive = std::make_shared<Liveness>();
+		w->m_alive->owner = w;
 		if (!w->Create(parent)) {
 			delete w;
 			return nullptr;
@@ -147,6 +150,7 @@ public:
 		if (!s_instance) s_instance = new BrowseWindow();
 		if (!s_instance->m_hWnd) {
 			s_instance->m_alive = std::make_shared<Liveness>();
+			s_instance->m_alive->owner = s_instance;
 			s_instance->Create(reinterpret_cast<HWND>(owner));
 		}
 		s_instance->ShowWindow(SW_SHOW);
@@ -946,8 +950,9 @@ private:
 
 			if (!alive->alive) return;
 			fb2k::inMainThread([alive, all, nickname, uid] {
-				if (!alive->alive || !s_instance || !s_instance->m_hWnd) return;
-				s_instance->apply_playlists(all, nickname, uid);
+				auto * self = static_cast<BrowseWindow *>(alive->owner);
+				if (!alive->alive || !self || !self->m_hWnd) return;
+				self->apply_playlists(all, nickname, uid);
 			});
 		});
 	}
@@ -990,8 +995,9 @@ private:
 
 			if (!alive->alive) return;
 			fb2k::inMainThread([alive, tracks, summary] {
-				if (!alive->alive || !s_instance || !s_instance->m_hWnd) return;
-				s_instance->apply_tracks(tracks, summary);
+				auto * self = static_cast<BrowseWindow *>(alive->owner);
+				if (!alive->alive || !self || !self->m_hWnd) return;
+				self->apply_tracks(tracks, summary);
 			});
 		});
 	}
@@ -1024,17 +1030,18 @@ private:
 			}
 			if (!alive->alive) return;
 			fb2k::inMainThread([alive, tracks, summary, offset, append, empty_page] {
-				if (!alive->alive || !s_instance || !s_instance->m_hWnd) return;
+				auto * self = static_cast<BrowseWindow *>(alive->owner);
+				if (!alive->alive || !self || !self->m_hWnd) return;
 				if (append && empty_page) {
-					s_instance->set_status(netease::to_wide(summary).c_str());
+					self->set_status(netease::to_wide(summary).c_str());
 					return;
 				}
 				if (append) {
-					s_instance->append_tracks(tracks, summary);
+					self->append_tracks(tracks, summary);
 				} else {
-					s_instance->apply_tracks(tracks, summary);
+					self->apply_tracks(tracks, summary);
 				}
-				s_instance->m_searchOffset = offset + static_cast<int>(tracks.size());
+				self->m_searchOffset = offset + static_cast<int>(tracks.size());
 			});
 		});
 	}
@@ -1056,8 +1063,9 @@ private:
 	static void post_status(const std::shared_ptr<Liveness> & alive, const std::string & text) {
 		if (!alive->alive) return;
 		fb2k::inMainThread([alive, text] {
-			if (!alive->alive || !s_instance || !s_instance->m_hWnd) return;
-			s_instance->set_status(netease::to_wide(text).c_str());
+			auto * self = static_cast<BrowseWindow *>(alive->owner);
+			if (!alive->alive || !self || !self->m_hWnd) return;
+			self->set_status(netease::to_wide(text).c_str());
 		});
 	}
 

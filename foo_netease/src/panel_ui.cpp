@@ -18,6 +18,7 @@
 #include "core/meta_cache.h"
 #include "lyric_ui.h"
 #include "netease_data.h"
+#include "resource.h"
 #include "browse_ui.h"
 #include "session.h"
 #include "theme.h"
